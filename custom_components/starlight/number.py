@@ -48,6 +48,7 @@ class StairCountNumber(_Number):
     _attr_icon = "mdi:stairs"
     _attr_native_min_value = 1
     _attr_entity_category = EntityCategory.CONFIG
+    _attr_entity_registry_enabled_default = False
 
     def __init__(self, device: StarlightDevice) -> None:
         super().__init__(device)

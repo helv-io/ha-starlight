@@ -22,7 +22,8 @@
       "sweep_up": {"default": "mdi:arrow-up-bold"}
     },
     "sensor": {
-      "rssi": {"default": "mdi:signal"}
+      "rssi": {"default": "mdi:signal"},
+      "last_notify": {"default": "mdi:message-reply-text"}
     }
   },
   "services": {

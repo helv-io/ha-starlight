@@ -68,7 +68,7 @@ class StairModeSelect(StarlightEntity, SelectEntity):
 
     @property
     def options(self) -> list[str]:
-        return self._device.effect_options()
+        return self._device.effect_options(tab_only=True)
 
     @property
     def current_option(self) -> str | None:

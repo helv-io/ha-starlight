@@ -20,23 +20,26 @@ class StairMode:
     tab: str
 
 
-# Tab assignment is UNVERIFIED. The wire values are from the app enum.
-# singleStep shares wire 2 with stepByStep. threeFollow shares wire 3 with follow.
+# Wire values are the app enum. singleStep shares wire 2 with stepByStep.
+# threeFollow shares wire 3 with follow. Tab grouping follows those names:
+# step modes stay on Step, motion effects on Stream, full-run effects on Time.
 STAIR_MODES: tuple[StairMode, ...] = (
-    StairMode("step", 2, "Step", "step"),
+    StairMode("full", 1, "Full", "time"),
+    StairMode("step", 2, "Step by step", "step"),
     StairMode("follow", 3, "Follow", "step"),
     StairMode("interval", 4, "Interval", "step"),
-    StairMode("two_step", 13, "Two step", "step"),
-    StairMode("single_follow", 14, "Single follow", "step"),
     StairMode("stream", 5, "Stream", "stream"),
     StairMode("stars", 6, "Stars", "stream"),
-    StairMode("alternate", 7, "Alternate", "stream"),
-    StairMode("chase", 12, "Chase", "stream"),
-    StairMode("jump", 10, "Jump", "stream"),
+    StairMode("alternate", 7, "Alternating", "stream"),
+    StairMode("reverse_gradient", 8, "Reverse gradient", "time"),
     StairMode("random", 9, "Random", "stream"),
-    StairMode("full", 1, "Full", "time"),
-    StairMode("fade_forward", 11, "Fade forward", "time"),
-    StairMode("fade_back", 8, "Fade back", "time"),
+    StairMode("jump", 10, "Jump", "stream"),
+    StairMode("positive_gradient", 11, "Positive gradient", "time"),
+    StairMode("chase", 12, "Chase", "stream"),
+    StairMode("single_step", 2, "Single step", "step"),
+    StairMode("three_follow", 3, "Three follow", "step"),
+    StairMode("two_step", 13, "Two step", "step"),
+    StairMode("single_follow", 14, "Single follow", "step"),
 )
 
 TABS = {"step": 0, "stream": 1, "time": 2}
@@ -74,17 +77,20 @@ def stair_mode(
     p3: int = 0,
     color_type: int = 0,
     n_colors: int = 1,
+    opcode: int = 0x10,
 ) -> bytes:
-    """EF 10 stair mode setting.
+    """Stair mode setting.
 
-    p3 is UNVERIFIED. Sweep uses 0 for top to bottom and 1 for bottom to top.
-    flag_on encodes the motion-sensor enable as 0x23 or 0x24.
+    Opcode 0x10 is the color stair command. Opcode 0x20 is the same layout
+    for a carrier or color-temperature stair. p3 is the direction byte:
+    sweep uses 0 for top to bottom and 1 for bottom to top. flag_on encodes
+    the motion-sensor enable as 0x23 or 0x24.
     """
     return (
         bytes(
             (
                 0xEF,
-                0x10,
+                opcode & 0xFF,
                 tab & 0xFF,
                 max(0, min(100, brightness)) & 0xFF,
                 p3 & 0xFF,

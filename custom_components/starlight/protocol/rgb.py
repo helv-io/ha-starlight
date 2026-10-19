@@ -89,8 +89,24 @@ def _uses_v2(product: Product | None, ble_version: int | None) -> bool:
     )
 
 
+def _stair_power(on: bool) -> bytes:
+    """Power for a stair state protocol that lists switch_led_v3.
+
+    The app sends ``E0 01 01`` plus the open byte and ten zero bytes. The
+    shared switch_led_v3 template is a different layout and stays in use for
+    every other product.
+    """
+    return bytes((0xE0, 0x01, 0x01, 0x23 if on else 0x24)) + bytes(10)
+
+
 def power_payload(product: Product | None, on: bool, firmware: int = 0) -> bytes:
     """Build a power payload. Prefers v3, then v2, then the 0x71 command."""
+    if (
+        product is not None
+        and product.kind == "stair"
+        and product.supports("switch_led_v3", firmware)
+    ):
+        return _stair_power(on)
     code = None
     if product is not None:
         code = product.best(firmware, ["switch_led_v3", "switch_led_v2", "switch_led"])

@@ -28,7 +28,7 @@ from .const import (
 )
 from .device import friendly_name
 from .protocol.advert import parse_service_info
-from .protocol.products import get_product
+from .protocol.products import get_product, load_tables
 
 _MAC = re.compile(r"^([0-9A-F]{2}:){5}[0-9A-F]{2}$")
 
@@ -53,6 +53,7 @@ class StarlightConfigFlow(ConfigFlow, domain=DOMAIN):
 
     async def async_step_bluetooth(self, discovery_info: BluetoothServiceInfoBleak) -> FlowResult:
         """Handle a device found by the bluetooth integration."""
+        await self.hass.async_add_executor_job(load_tables)
         advert = parse_service_info(discovery_info)
         if advert is None or not advert.product_id:
             return self.async_abort(reason="not_supported")
@@ -87,6 +88,7 @@ class StarlightConfigFlow(ConfigFlow, domain=DOMAIN):
 
     async def async_step_user(self, user_input: dict[str, Any] | None = None) -> FlowResult:
         """Pick a discovered light or type an address."""
+        await self.hass.async_add_executor_job(load_tables)
         discovered = self._discover()
         if user_input is not None:
             manual = (user_input.get("manual_address") or "").strip().upper()

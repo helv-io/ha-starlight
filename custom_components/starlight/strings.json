@@ -91,6 +91,9 @@
     "sensor": {
       "rssi": {
         "name": "Signal strength"
+      },
+      "last_notify": {
+        "name": "Last notification"
       }
     }
   },

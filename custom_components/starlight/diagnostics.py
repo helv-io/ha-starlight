@@ -30,6 +30,7 @@ async def async_get_config_entry_diagnostics(
         "connected": device.connected,
         "available": device.available,
         "rssi": state.rssi,
+        "last_notify": state.last_notify,
         "is_on": state.is_on,
         "brightness": state.brightness,
         "effect": state.effect,
