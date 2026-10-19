@@ -1,0 +1,39 @@
+sweep:
+  name: Sweep
+  description: Run the stairs from one end to the other.
+  target:
+    entity:
+      integration: starlight
+      domain: light
+  fields:
+    direction:
+      name: Direction
+      description: Which way the light travels.
+      required: true
+      selector:
+        select:
+          options:
+            - label: Top to bottom
+              value: down
+            - label: Bottom to top
+              value: up
+send_payload:
+  name: Send payload
+  description: Send a raw command while the protocol is still being checked.
+  target:
+    entity:
+      integration: starlight
+      domain: light
+  fields:
+    payload:
+      name: Payload
+      description: Hex bytes without the frame header.
+      required: true
+      example: "EF 10 00 32 00 24 00 01 02 00 00 64"
+      selector:
+        text:
+    force:
+      name: Allow install commands
+      description: Send commands that change wiring or step setup.
+      selector:
+        boolean:
