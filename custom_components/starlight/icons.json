@@ -1,0 +1,32 @@
+{
+  "entity": {
+    "select": {
+      "effect_tab": {"default": "mdi:tab"},
+      "effect": {"default": "mdi:palette"},
+      "power_on": {"default": "mdi:power-settings"}
+    },
+    "number": {
+      "stair_count": {"default": "mdi:stairs"},
+      "run_time": {"default": "mdi:timer-outline"},
+      "hold_time": {"default": "mdi:timer-outline"},
+      "effect_speed": {"default": "mdi:speedometer"},
+      "mic_sensitivity": {"default": "mdi:microphone"}
+    },
+    "switch": {
+      "induction": {"default": "mdi:motion-sensor"},
+      "slow_open": {"default": "mdi:speedometer-slow"},
+      "microphone": {"default": "mdi:microphone"}
+    },
+    "button": {
+      "sweep_down": {"default": "mdi:arrow-down-bold"},
+      "sweep_up": {"default": "mdi:arrow-up-bold"}
+    },
+    "sensor": {
+      "rssi": {"default": "mdi:signal"}
+    }
+  },
+  "services": {
+    "sweep": "mdi:stairs",
+    "send_payload": "mdi:code-braces"
+  }
+}

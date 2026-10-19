@@ -1,0 +1,123 @@
+{
+  "config": {
+    "flow_title": "{name}",
+    "step": {
+      "user": {
+        "title": "Add a light",
+        "description": "Pick a light that is already nearby, or type its Bluetooth address.",
+        "data": {
+          "address": "Light",
+          "manual_address": "Bluetooth address"
+        }
+      },
+      "bluetooth_confirm": {
+        "title": "Add {name}",
+        "description": "Add {name}. Model {model}."
+      }
+    },
+    "error": {
+      "invalid_address": "Enter an address like AA:BB:CC:DD:EE:FF.",
+      "no_device": "Pick a light or type an address."
+    },
+    "abort": {
+      "already_configured": "This light is already added.",
+      "not_supported": "This Bluetooth device is not a supported light.",
+      "already_in_progress": "This light is already being added."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Light options",
+        "data": {
+          "header_version": "Frame version",
+          "disconnect_delay": "Idle disconnect"
+        },
+        "data_description": {
+          "header_version": "Auto follows the broadcast. Choose 0 or 1 only if commands are ignored.",
+          "disconnect_delay": "Seconds to keep the link after a command. 0 drops it at once."
+        }
+      }
+    }
+  },
+  "entity": {
+    "select": {
+      "effect_tab": {
+        "name": "Effect tab"
+      },
+      "effect": {
+        "name": "Effect"
+      },
+      "power_on": {
+        "name": "Power on color"
+      }
+    },
+    "number": {
+      "stair_count": {
+        "name": "Step count"
+      },
+      "run_time": {
+        "name": "Run time"
+      },
+      "hold_time": {
+        "name": "Hold time"
+      },
+      "effect_speed": {
+        "name": "Effect speed"
+      },
+      "mic_sensitivity": {
+        "name": "Mic sensitivity"
+      }
+    },
+    "switch": {
+      "induction": {
+        "name": "Motion trigger"
+      },
+      "slow_open": {
+        "name": "Soft start"
+      },
+      "microphone": {
+        "name": "Microphone"
+      }
+    },
+    "button": {
+      "sweep_down": {
+        "name": "Sweep down"
+      },
+      "sweep_up": {
+        "name": "Sweep up"
+      }
+    },
+    "sensor": {
+      "rssi": {
+        "name": "Signal strength"
+      }
+    }
+  },
+  "services": {
+    "sweep": {
+      "name": "Sweep",
+      "description": "Run the stairs from one end to the other.",
+      "fields": {
+        "direction": {
+          "name": "Direction",
+          "description": "Which way the light travels."
+        }
+      }
+    },
+    "send_payload": {
+      "name": "Send payload",
+      "description": "Send a raw command while the protocol is still being checked.",
+      "fields": {
+        "payload": {
+          "name": "Payload",
+          "description": "Hex bytes without the frame header."
+        },
+        "force": {
+          "name": "Allow install commands",
+          "description": "Send commands that change wiring or step setup."
+        }
+      }
+    }
+  }
+}

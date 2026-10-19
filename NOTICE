@@ -1,0 +1,16 @@
+Starlight includes code and device tables adapted from the MIT-licensed
+LEDnetWF Home Assistant integration:
+
+  https://github.com/8none1/lednetwf_ble
+  Copyright (c) 8none1 and contributors
+
+The reused parts are the ZGHB single-segment frame used on BLE version
+below 8, the 27-byte manufacturer-data layout, the RGB / CCT / addressable
+command bytes (opcodes 0x31, 0x3B, 0x38, 0x42, 0x61, and 0x73), the 0x81
+state parser, and the product and command tables under
+custom_components/starlight/data/.
+
+Those files keep their MIT terms. The stair-light commands (products 198
+and 532) are original to this project.
+
+The original license text is in LICENSE.
