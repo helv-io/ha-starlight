@@ -12,6 +12,7 @@ import json
 from dataclasses import dataclass
 
 OPCODE_STATE = 0x0C
+OPCODE_RESPONSE = 0x15
 OPCODE_STATE_V2 = 0x16
 
 
@@ -127,4 +128,11 @@ def payload_from_notify(data: bytes) -> tuple[int | None, bytes]:
                 payload = bytes.fromhex(body["payload"])
             except ValueError:
                 pass
-    return frame.opcode, payload
+    opcode = frame.opcode
+    # Opcode 0x15 wraps the application payload. When that payload is itself
+    # a transport frame, strip the inner header once.
+    if opcode == OPCODE_RESPONSE and len(payload) >= 8 and payload[2:4] == b"\x80\x00":
+        nested = parse_frame(payload)
+        if nested is not None and nested.payload:
+            return nested.opcode, nested.payload
+    return opcode, payload

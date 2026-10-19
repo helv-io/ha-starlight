@@ -43,7 +43,7 @@ class RssiSensor(StarlightEntity, SensorEntity):
 
 
 class LastNotifySensor(StarlightEntity, SensorEntity):
-    """Hex of the last GATT notification. Empty until the controller replies."""
+    """Readable summary of the last GATT notification."""
 
     _attr_translation_key = "last_notify"
     _attr_entity_category = EntityCategory.DIAGNOSTIC
@@ -55,7 +55,13 @@ class LastNotifySensor(StarlightEntity, SensorEntity):
 
     @property
     def native_value(self) -> str | None:
-        value = self._device.state.last_notify
+        value = self._device.state.last_summary
         if value is not None and len(value) > 255:
             return value[:255]
         return value
+
+    @property
+    def extra_state_attributes(self) -> dict | None:
+        if not self._device.state.last_fields:
+            return None
+        return dict(self._device.state.last_fields)

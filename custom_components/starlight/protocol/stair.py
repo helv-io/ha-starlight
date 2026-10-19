@@ -52,6 +52,23 @@ def mode_by_key(key: str) -> StairMode | None:
     return _BY_KEY.get(key) or _BY_LABEL.get(key)
 
 
+def mode_by_wire(wire: int) -> StairMode | None:
+    """Look up a mode by its wire value. Shared wires keep the first name."""
+    for mode in STAIR_MODES:
+        if mode.wire == wire:
+            return mode
+    return None
+
+
+TAB_LABELS = {"step": "Step", "stream": "Stream", "time": "Time"}
+_TAB_BY_INDEX = {0: "step", 1: "stream", 2: "time"}
+
+
+def tab_by_index(index: int) -> str | None:
+    """Map a stair tab index to its key."""
+    return _TAB_BY_INDEX.get(index)
+
+
 def modes_for_tab(tab: str) -> tuple[StairMode, ...]:
     """Return the modes grouped under one tab."""
     return tuple(mode for mode in STAIR_MODES if mode.tab == tab)

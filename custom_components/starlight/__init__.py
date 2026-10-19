@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from datetime import timedelta
 
 from homeassistant.components.bluetooth import (
     BluetoothCallbackMatcher,
@@ -15,9 +16,10 @@ from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import config_validation as cv
+from homeassistant.helpers.event import async_track_time_interval
 from homeassistant.helpers.service import async_extract_config_entry_ids
 
-from .const import BLOCKED_EF, DOMAIN
+from .const import BLOCKED_EF, DOMAIN, STATE_POLL_SECONDS
 from .device import StarlightDevice
 from .protocol.advert import parse_service_info
 from .protocol.products import load_tables
@@ -99,7 +101,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         BluetoothCallbackMatcher(address=device.address),
         BluetoothChange.ADVERTISEMENT,
     )
+
+    async def _poll_state(_now) -> None:
+        await device.async_request_state()
+
     entry.async_on_unload(unregister)
+    entry.async_on_unload(
+        async_track_time_interval(hass, _poll_state, timedelta(seconds=STATE_POLL_SECONDS))
+    )
     entry.async_on_unload(entry.add_update_listener(_reload))
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     return True

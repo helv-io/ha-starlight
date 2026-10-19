@@ -39,11 +39,9 @@ from .const import (
     OPCODE_COMMAND,
     OPCODE_QUERY,
     OPCODE_STAIR,
-    OPCODE_STATE,
-    OPCODE_STATE_V2,
     WRITE_UUID,
 )
-from .protocol.advert import Advertisement, parse_stair_state
+from .protocol.advert import Advertisement
 from .protocol.products import Product, get_product
 from .protocol.rgb import (
     ADDRESSABLE_EFFECTS,
@@ -55,7 +53,6 @@ from .protocol.rgb import (
     effect_payload,
     ha_hs_to_rgb,
     music_payload,
-    parse_state_response,
     percent_to_brightness,
     percent_to_kelvin,
     power_payload,
@@ -74,6 +71,7 @@ from .protocol.stair import (
     stair_slow,
     stair_time,
 )
+from .protocol.state import DecodedState, decode_payload, field_map, summary_for
 from .protocol.transport import build_frame, header_version_for, payload_from_notify
 
 _LOGGER = logging.getLogger(__name__)
@@ -114,6 +112,9 @@ class RuntimeState:
     mode_key: str = "step"
     rssi: int | None = None
     last_notify: str | None = None
+    last_summary: str | None = None
+    last_fields: dict = field(default_factory=dict)
+    last_advert_fields: dict = field(default_factory=dict)
     listeners: list[Listener] = field(default_factory=list)
 
 
@@ -229,6 +230,14 @@ class StarlightDevice:
             changed = True
         if advert.rssi is not None:
             self.state.rssi = advert.rssi
+        if changed:
+            self._persist_identity()
+        decoded = None
+        if advert.manufacturer_state:
+            decoded = decode_payload(advert.manufacturer_state, self.product)
+        if decoded is not None and decoded.known:
+            self._apply_decoded(decoded, source="advert", raw=advert.manufacturer_state.hex())
+            return
         if advert.power is not None:
             self.state.is_on = advert.power
         if advert.hs is not None:
@@ -245,8 +254,6 @@ class StarlightDevice:
             self.state.color_mode = "color_temp"
         if advert.effect_id is not None:
             self.state.effect = self._effect_name(advert.effect_id)
-        if changed:
-            self._persist_identity()
         self._notify()
 
     def _persist_identity(self) -> None:
@@ -434,6 +441,13 @@ class StarlightDevice:
         self._notify()
         if self.kind != "stair":
             await self._send_visual()
+
+    async def async_request_state(self) -> None:
+        """Ask the controller for a state upload. Failures stay on the device."""
+        try:
+            await self._send(state_query_payload(), OPCODE_QUERY)
+        except HomeAssistantError:
+            _LOGGER.debug("State query failed for %s", self.address)
 
     async def async_send_payload(self, payload: bytes, opcode: int | None = None) -> str:
         """Send a raw payload and return the frame hex. Used by the service."""
@@ -662,46 +676,84 @@ class StarlightDevice:
             None if opcode is None else f"{opcode:02X}",
             payload.hex(),
         )
-        if payload and payload[0] == 0x81:
-            self._apply_standard_state(payload)
-            return
-        if payload and self.kind == "stair" and opcode in (OPCODE_STATE, OPCODE_STATE_V2):
-            self._apply_stair_state(payload)
-            return
-        if payload and opcode in (OPCODE_STATE, OPCODE_STATE_V2):
-            self._apply_standard_state(payload)
-            return
-        self._notify()
-
-    def _apply_standard_state(self, payload: bytes) -> None:
-        parsed = parse_state_response(payload)
-        if parsed is None:
+        decoded = decode_payload(payload, self.product) if payload else DecodedState()
+        if not decoded.known:
+            fields = dict(self.state.last_fields)
+            fields["raw"] = raw.hex()
+            if opcode is not None:
+                fields["opcode"] = f"0x{opcode:02X}"
+            self.state.last_fields = fields
             self._notify()
             return
-        self.state.is_on = bool(parsed["is_on"])
-        if parsed["is_rgb"]:
-            self.state.hs = rgb_to_hs(parsed["r"], parsed["g"], parsed["b"])
+        self._apply_decoded(decoded, source="notify", raw=raw.hex(), opcode=opcode)
+
+    def _apply_decoded(
+        self,
+        decoded: DecodedState,
+        *,
+        source: str,
+        raw: str,
+        opcode: int | None = None,
+    ) -> None:
+        """Copy one decoded record onto the entities.
+
+        Advertisements update the light and a separate diagnostic map. They
+        leave the last-notification summary alone, because that sensor is the
+        last FF02 reply.
+        """
+        if decoded.is_on is not None:
+            self.state.is_on = decoded.is_on
+        if decoded.brightness is not None:
+            self.state.brightness = percent_to_brightness(decoded.brightness)
+        if decoded.rgb is not None:
+            self.state.hs = rgb_to_hs(*decoded.rgb)
             self.state.color_mode = "hs"
-            self.state.effect = None
-            _hue, _sat, value = _value_from_rgb(parsed["r"], parsed["g"], parsed["b"])
-            self.state.brightness = percent_to_brightness(round(value * 100))
-        elif parsed["is_white"]:
+            _hue, _sat, value = _value_from_rgb(*decoded.rgb)
+            if decoded.brightness is None:
+                decoded.brightness = round(value * 100)
+                self.state.brightness = percent_to_brightness(decoded.brightness)
+            if self.kind != "stair":
+                self.state.effect = None
+        elif decoded.hs is not None:
+            self.state.hs = decoded.hs
+            self.state.color_mode = "hs"
+            if self.kind != "stair":
+                self.state.effect = None
+        if decoded.color_temp:
             self.state.color_mode = "color_temp"
-            self.state.brightness = percent_to_brightness(parsed["value1"])
-        elif parsed["is_effect"] and parsed["effect_id"] is not None:
-            name = self._effect_name(parsed["effect_id"])
+        effect = None
+        if decoded.stair_mode is not None:
+            self.state.mode_key = decoded.stair_mode.key
+            self.state.tab = decoded.stair_mode.tab
+            self.state.effect = decoded.stair_mode.label
+            effect = decoded.stair_mode.label
+        elif decoded.tab is not None:
+            self.state.tab = decoded.tab
+        if decoded.effect_id is not None:
+            name = self._effect_name(decoded.effect_id)
             if name:
                 self.state.effect = name
-        self._notify()
-
-    def _apply_stair_state(self, payload: bytes) -> None:
-        """Apply a stair state upload when the app's 0x23/0x24 flag is present."""
-        parsed = parse_stair_state(payload)
-        if parsed is not None:
-            power, hs = parsed
-            self.state.is_on = power
-            if hs is not None:
-                self.state.hs = hs
+                effect = name
+        if decoded.induction is not None:
+            self.state.induction = decoded.induction
+        if decoded.slow_open is not None:
+            self.state.slow_open = decoded.slow_open
+        if decoded.run_time is not None:
+            self.state.run_time = decoded.run_time
+        if decoded.hold_time is not None:
+            self.state.hold_time = decoded.hold_time
+        mapped = field_map(decoded, effect=effect, raw=raw, opcode=opcode)
+        if source == "notify":
+            text = summary_for(
+                is_on=decoded.is_on,
+                effect=effect,
+                brightness=decoded.brightness,
+            )
+            if text:
+                self.state.last_summary = text
+            self.state.last_fields = mapped
+        else:
+            self.state.last_advert_fields = mapped
         self._notify()
 
 

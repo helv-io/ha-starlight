@@ -27,8 +27,13 @@ OPCODE_COMMAND: Final = 0x0B
 OPCODE_STAIR: Final = 0x0A
 
 # Notification opcodes carrying a state upload.
+# 0x15 is the response wrapper around an application payload such as EA 81.
 OPCODE_STATE: Final = 0x0C
+OPCODE_RESPONSE: Final = 0x15
 OPCODE_STATE_V2: Final = 0x16
+
+# How often to ask a connected controller for a fresh state upload.
+STATE_POLL_SECONDS: Final = 30
 
 MANUFACTURER: Final = "Starlight"
 MIN_KELVIN: Final = 2700
