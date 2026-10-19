@@ -25,10 +25,16 @@ from custom_components.starlight.protocol.stair import (
     stair_slow,
     stair_time,
 )
+from custom_components.starlight.protocol.state import (
+    decode_payload,
+    find_stair_record,
+    summary_for,
+)
 from custom_components.starlight.protocol.transport import (
     build_frame,
     header_version_for,
     parse_frame,
+    payload_from_notify,
 )
 
 
@@ -220,7 +226,10 @@ def test_split_advert_identity() -> None:
     assert advert.led_version == 1
     assert advert.company_id == 0x5A02
     assert advert.rssi == -87
-    assert advert.power is None
+    assert advert.power is True
+    assert advert.hs == (0.0, 100.0)
+    assert advert.brightness_percent == 95
+    assert advert.manufacturer_state == state
     assert header_version_for(advert.ble_version) == 0
     product = get_product(advert.product_id)
     assert product is not None
@@ -229,6 +238,93 @@ def test_split_advert_identity() -> None:
     assert product.channels == 32
     assert parse_stair_state(state) is None
     assert parse_stair_state(state[1:26]) is None
+    assert find_stair_record(state) is not None
+    decoded = decode_payload(state, product)
+    assert decoded.is_on is True
+    assert decoded.hs == (0.0, 100.0)
+    assert decoded.brightness == 95
+    assert decoded.induction is True
+    assert decoded.slow_open is True
+    assert decoded.stair_mode is None
+
+
+NOTIFY_STATE = bytes.fromhex("ea810100140123000000f000646464640100")
+ADVERT_STATE = bytes.fromhex("8023030000f03c645f645f01006420000f235f0103000500640000")
+
+
+def test_state_query_and_response_wrapper() -> None:
+    """The live query is opcode 0x0A. Opcode 0x15 returns the application bytes."""
+    query = build_frame(state_query_payload(), 0, 1, 0x0A)
+    assert query.hex() == "000180000004050a818a8b96"
+    opcode, payload = payload_from_notify(query)
+    assert opcode == 0x0A
+    assert payload == state_query_payload()
+
+    wrapped = build_frame(NOTIFY_STATE, 0, 1, 0x15)
+    opcode, payload = payload_from_notify(wrapped)
+    assert opcode == 0x15
+    assert payload == NOTIFY_STATE
+
+    inner = build_frame(bytes.fromhex("811d2361f000ff00000002003000"), 0, 2, 0x0C)
+    outer = build_frame(inner, 0, 1, 0x15)
+    opcode, payload = payload_from_notify(outer)
+    assert opcode == 0x0C
+    assert payload.hex() == "811d2361f000ff00000002003000"
+
+
+def test_stair_notify_decodes_full_red() -> None:
+    """Live 0x15 payload: power on, Full, hue 200, full saturation and brightness."""
+    product = _first("stair")
+    decoded = decode_payload(NOTIFY_STATE, product)
+    assert decoded.is_on is True
+    assert decoded.brightness == 100
+    assert decoded.hs == (200.0, 100.0)
+    assert decoded.stair_mode is not None
+    assert decoded.stair_mode.key == "full"
+    assert decoded.tab == "time"
+    assert decoded.induction is False
+    assert decoded.slow_open is False
+    assert (
+        summary_for(
+            is_on=decoded.is_on,
+            effect=decoded.stair_mode.label,
+            brightness=decoded.brightness,
+        )
+        == "on, Full, 100%"
+    )
+
+
+def test_rgb_state_replies() -> None:
+    """0x81 color and 0x25 effect replies stay on the RGB parser."""
+    product = _first("rgb")
+    color = decode_payload(bytes.fromhex("811d2361f000ff00000002003000"), product)
+    assert color.is_on is True
+    assert color.rgb == (255, 0, 0)
+    assert color.stair_mode is None
+    effect = decode_payload(bytes.fromhex("8100232530640000000000000000"), product)
+    assert effect.is_on is True
+    assert effect.effect_id == 48
+    assert effect.brightness == 100
+    # A stair product must not be required for this reply, and an RGB product
+    # must not be parsed as a stair record.
+    assert decode_payload(bytes.fromhex("8100232530640000000000000000"), product).stair_mode is None
+
+
+def test_stair_command_echoes() -> None:
+    product = _first("stair")
+    timing = decode_payload(stair_time(12, 34), product)
+    assert timing.run_time == 12
+    assert timing.hold_time == 34
+    slow = decode_payload(stair_slow(True), product)
+    assert slow.slow_open is True
+    assert decode_payload(stair_slow(False), product).slow_open is False
+    echoed = decode_payload(stair_mode(0, 40, True, 2, pack_color(0, 100, 100)), product)
+    assert echoed.is_on is True
+    assert echoed.brightness == 40
+    assert echoed.induction is True
+    assert echoed.stair_mode is not None
+    assert echoed.stair_mode.key == "step"
+    assert echoed.tab == "step"
 
 
 def test_stair_state_flag() -> None:

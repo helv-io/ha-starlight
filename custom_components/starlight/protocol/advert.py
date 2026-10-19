@@ -42,6 +42,7 @@ class Advertisement:
     name: str | None = None
     rssi: int | None = None
     hs: tuple[float, float] | None = None
+    manufacturer_state: bytes | None = None
 
 
 def _company_ok(company_id: int) -> bool:
@@ -191,36 +192,36 @@ def _service_identity(service_data: dict[str, bytes] | None) -> Advertisement | 
     return None
 
 
-def _split_state(data: bytes, ble_version: int, kind: str) -> Advertisement | None:
+def _split_state(data: bytes, ble_version: int, product) -> Advertisement | None:
     """Read state from a manufacturer value that is not an identity block."""
-    if kind == "stair":
-        # bleVersion >= 7 copies 25 bytes starting at raw manufacturer offset 3,
-        # which is bleak index 1. The app's stair offsets have an unconfirmed
-        # header, so the whole value is the second candidate.
-        windows = [data]
-        if len(data) >= 26:
-            windows.insert(0, data[1:26])
-        for window in windows:
-            parsed = parse_stair_state(window)
-            if parsed is None:
-                continue
-            power, hs = parsed
-            return Advertisement(
-                product_id=0,
-                ble_version=ble_version,
-                firmware="",
-                firmware_ver=0,
-                led_version=0,
-                mac="",
-                power=power,
-                color_mode="hs" if hs else None,
-                rgb=None,
-                brightness_percent=None,
-                color_temp_percent=None,
-                effect_id=None,
-                company_id=0,
-                hs=hs,
-            )
+    from .state import decode_payload
+
+    decoded = decode_payload(data, product)
+    if decoded.known:
+        if decoded.hs or decoded.rgb:
+            color_mode = "hs"
+        elif decoded.color_temp:
+            color_mode = "cct"
+        else:
+            color_mode = None
+        return Advertisement(
+            product_id=0,
+            ble_version=ble_version,
+            firmware="",
+            firmware_ver=0,
+            led_version=0,
+            mac="",
+            power=decoded.is_on,
+            color_mode=color_mode,
+            rgb=decoded.rgb,
+            brightness_percent=decoded.brightness,
+            color_temp_percent=None,
+            effect_id=decoded.effect_id,
+            company_id=0,
+            hs=decoded.hs,
+            manufacturer_state=data,
+        )
+    if product is not None and getattr(product, "kind", "") == "stair":
         return None
     power, color_mode, rgb, bright, temp, effect = _parse_standard_state(data, ble_version)
     if power is None and color_mode is None:
@@ -239,6 +240,7 @@ def _split_state(data: bytes, ble_version: int, kind: str) -> Advertisement | No
         color_temp_percent=temp,
         effect_id=effect,
         company_id=0,
+        manufacturer_state=data,
     )
 
 
@@ -250,10 +252,11 @@ def parse_service_info(service_info) -> Advertisement | None:
     service = _service_identity(getattr(service_info, "service_data", None))
     if service is not None:
         product = get_product(service.product_id)
-        kind = product.kind if product is not None else ""
         state = None
+        raw_state = None
         if manufacturer is not None:
-            state = _split_state(manufacturer[1], service.ble_version, kind)
+            raw_state = manufacturer[1]
+            state = _split_state(raw_state, service.ble_version, product)
         parsed = Advertisement(
             product_id=service.product_id,
             ble_version=service.ble_version,
@@ -269,9 +272,12 @@ def parse_service_info(service_info) -> Advertisement | None:
             effect_id=state.effect_id if state else None,
             company_id=service.company_id,
             hs=state.hs if state else None,
+            manufacturer_state=raw_state,
         )
     else:
-        parsed = parse_manufacturer_data(dict(getattr(service_info, "manufacturer_data", None) or {}))
+        parsed = parse_manufacturer_data(
+            dict(getattr(service_info, "manufacturer_data", None) or {})
+        )
     if parsed is None:
         return None
     return Advertisement(
@@ -291,6 +297,7 @@ def parse_service_info(service_info) -> Advertisement | None:
         name=getattr(service_info, "name", None),
         rssi=getattr(service_info, "rssi", None),
         hs=parsed.hs,
+        manufacturer_state=parsed.manufacturer_state,
     )
 
 
