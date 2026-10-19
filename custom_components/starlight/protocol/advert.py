@@ -1,21 +1,25 @@
-"""Advertisement parsing for the Zengge-family manufacturer block.
+"""Advertisement parsing for Zengge-family broadcasts.
 
-Home Assistant exposes manufacturer data with the company id as the dict
-key and the remaining bytes as the value (27 bytes for this family).
-The company id high byte is 0x5A, 0x5B, or 0x5C. The low byte is a status
-byte, so the id is not a single registered company number.
+Home Assistant exposes manufacturer data with the company id as the dict key
+and the remaining bytes as the value. A manufacturer-only advert is 27 bytes
+and carries identity: ble version at byte 1, MAC at bytes 2-7, product id at
+bytes 8-9. That layout matches the LEDnetWF integration.
 
-Field positions for the 27-byte value match the layout used by the
-LEDnetWF integration. Identity bytes also appear in 16-byte service data
-when bleVersion is 7 or higher.
+When the advert also has 16-bit service data under ``00005axx`` / ``00005bxx``
+/ ``00005cxx``, Home Assistant has already removed the UUID. The remaining
+bytes are identity and the manufacturer value is state. Identity from service
+data wins, which is what the controller app does.
 """
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 
 COMPANY_HI = (0x5A, 0x5B, 0x5C)
-SERVICE_MARK = "ffff"
+_FAMILY_SERVICE = re.compile(r"^0000(?:5a|5b|5c)[0-9a-f]{2}-0000-1000-8000-00805f9b34fb$")
+# sta, ble version, MAC, product id, firmware, led version.
+_SERVICE_IDENTITY_LEN = 12
 
 
 @dataclass(frozen=True)
@@ -37,6 +41,7 @@ class Advertisement:
     company_id: int
     name: str | None = None
     rssi: int | None = None
+    hs: tuple[float, float] | None = None
 
 
 def _company_ok(company_id: int) -> bool:
@@ -52,42 +57,50 @@ def _firmware(ble_version: int, fw_lo: int, flag: int) -> tuple[int, str]:
     return fw, f"{fw_lo:02X}"
 
 
+def _mac(data: bytes) -> str:
+    return ":".join(f"{b:02X}" for b in data)
+
+
 def parse_manufacturer_data(manufacturer_data: dict[int, bytes]) -> Advertisement | None:
     """Parse a bleak manufacturer_data dict. Returns None when it is not ours."""
+    block = _manufacturer_block(manufacturer_data)
+    if block is None:
+        return None
+    company_id, data = block
+    if len(data) < 27:
+        return None
+    data = data[:27]
+    ble_version = data[1]
+    product_id = (data[8] << 8) | data[9]
+    fw_num, fw_text = _firmware(ble_version, data[10], data[12] if len(data) > 12 else 0)
+    power, color_mode, rgb, bright, temp, effect = _parse_standard_state(data, ble_version)
+    return Advertisement(
+        product_id=product_id,
+        ble_version=ble_version,
+        firmware=fw_text,
+        firmware_ver=fw_num,
+        led_version=data[11],
+        mac=_mac(data[2:8]),
+        power=power,
+        color_mode=color_mode,
+        rgb=rgb,
+        brightness_percent=bright,
+        color_temp_percent=temp,
+        effect_id=effect,
+        company_id=company_id,
+    )
+
+
+def _manufacturer_block(manufacturer_data: dict[int, bytes] | None) -> tuple[int, bytes] | None:
     if not manufacturer_data:
         return None
     for company_id, raw in manufacturer_data.items():
-        if not _company_ok(company_id):
-            continue
-        data = bytes(raw)
-        if len(data) < 27:
-            continue
-        data = data[:27]
-        ble_version = data[1]
-        mac = ":".join(f"{b:02X}" for b in data[2:8])
-        product_id = (data[8] << 8) | data[9]
-        fw_num, fw_text = _firmware(ble_version, data[10], data[12] if len(data) > 12 else 0)
-        led_version = data[11]
-        power, color_mode, rgb, bright, temp, effect = _parse_state(data, ble_version)
-        return Advertisement(
-            product_id=product_id,
-            ble_version=ble_version,
-            firmware=fw_text,
-            firmware_ver=fw_num,
-            led_version=led_version,
-            mac=mac,
-            power=power,
-            color_mode=color_mode,
-            rgb=rgb,
-            brightness_percent=bright,
-            color_temp_percent=temp,
-            effect_id=effect,
-            company_id=company_id,
-        )
+        if _company_ok(company_id):
+            return company_id, bytes(raw)
     return None
 
 
-def _parse_state(
+def _parse_standard_state(
     data: bytes, ble_version: int
 ) -> tuple[
     bool | None,
@@ -97,10 +110,9 @@ def _parse_state(
     int | None,
     int | None,
 ]:
-    """Read power and color from the 11-byte state block at offset 14.
+    """Read power and color from the standard-light block at offset 14.
 
-    This is the standard-light layout. Stair broadcasts may use the same
-    power byte. The stair-specific notify parser is separate and unverified.
+    Power is 0x23 or 0x24. RGB uses mode 0x61. Effects use 0x25 or ids 37-56.
     """
     if ble_version < 5 or len(data) < 22:
         return None, None, None, None, None, None
@@ -131,48 +143,137 @@ def _parse_state(
     return power, color_mode, rgb, bright, temp, effect
 
 
-def _service_data_block(service_data: dict[str, bytes] | None) -> bytes | None:
+def parse_stair_state(data: bytes) -> tuple[bool, tuple[float, float] | None] | None:
+    """Parse one stair state record.
+
+    The app reads a 0x23/0x24 flag at byte 2 and hue/saturation at bytes 8-9.
+    The record is ignored unless that flag is present, so a state block with
+    a different header is left unknown instead of being forced into a color.
+    """
+    if len(data) < 10 or data[2] not in (0x23, 0x24):
+        return None
+    packed = (data[8] << 8) | data[9]
+    hue = (packed >> 7) & 0x1FF
+    sat = packed & 0x7F
+    hs = (float(hue), float(sat)) if hue <= 360 and sat <= 100 else None
+    return data[2] == 0x23, hs
+
+
+def _service_identity(service_data: dict[str, bytes] | None) -> Advertisement | None:
+    """Identity from a family service-data value with the UUID already removed."""
     if not service_data:
         return None
     for key, value in service_data.items():
-        if SERVICE_MARK in str(key).lower() and len(value) >= 16:
-            return bytes(value)
+        text = str(key).lower()
+        if _FAMILY_SERVICE.match(text) is None:
+            continue
+        data = bytes(value)
+        if len(data) < _SERVICE_IDENTITY_LEN:
+            continue
+        ble_version = data[1]
+        flag = data[12] if len(data) > 12 else 0
+        fw_num, fw_text = _firmware(ble_version, data[10], flag)
+        return Advertisement(
+            product_id=(data[8] << 8) | data[9],
+            ble_version=ble_version,
+            firmware=fw_text,
+            firmware_ver=fw_num,
+            led_version=data[11],
+            mac=_mac(data[2:8]),
+            power=None,
+            color_mode=None,
+            rgb=None,
+            brightness_percent=None,
+            color_temp_percent=None,
+            effect_id=None,
+            company_id=int(text[4:8], 16),
+        )
     return None
+
+
+def _split_state(data: bytes, ble_version: int, kind: str) -> Advertisement | None:
+    """Read state from a manufacturer value that is not an identity block."""
+    if kind == "stair":
+        # bleVersion >= 7 copies 25 bytes starting at raw manufacturer offset 3,
+        # which is bleak index 1. The app's stair offsets have an unconfirmed
+        # header, so the whole value is the second candidate.
+        windows = [data]
+        if len(data) >= 26:
+            windows.insert(0, data[1:26])
+        for window in windows:
+            parsed = parse_stair_state(window)
+            if parsed is None:
+                continue
+            power, hs = parsed
+            return Advertisement(
+                product_id=0,
+                ble_version=ble_version,
+                firmware="",
+                firmware_ver=0,
+                led_version=0,
+                mac="",
+                power=power,
+                color_mode="hs" if hs else None,
+                rgb=None,
+                brightness_percent=None,
+                color_temp_percent=None,
+                effect_id=None,
+                company_id=0,
+                hs=hs,
+            )
+        return None
+    power, color_mode, rgb, bright, temp, effect = _parse_standard_state(data, ble_version)
+    if power is None and color_mode is None:
+        return None
+    return Advertisement(
+        product_id=0,
+        ble_version=ble_version,
+        firmware="",
+        firmware_ver=0,
+        led_version=0,
+        mac="",
+        power=power,
+        color_mode=color_mode,
+        rgb=rgb,
+        brightness_percent=bright,
+        color_temp_percent=temp,
+        effect_id=effect,
+        company_id=0,
+    )
 
 
 def parse_service_info(service_info) -> Advertisement | None:
     """Parse a Home Assistant BluetoothServiceInfoBleak."""
-    parsed = parse_manufacturer_data(dict(service_info.manufacturer_data or {}))
-    service = _service_data_block(getattr(service_info, "service_data", None))
-    # bleVersion >= 7 repeats identity in service data. Prefer that product id
-    # when the manufacturer block was only a state trailer. UNVERIFIED when
-    # the two disagree; the service-data id wins because the app does that.
-    if service is not None and service[1] in COMPANY_HI and len(service) >= 16:
-        ble_version = service[3]
-        product_id = (service[10] << 8) | service[11]
-        mac = ":".join(f"{b:02X}" for b in service[4:10])
-        fw_num, fw_text = _firmware(ble_version, service[12], service[14])
-        if parsed is None or ble_version >= 7:
-            base = parsed
-            parsed = Advertisement(
-                product_id=product_id or (base.product_id if base else 0),
-                ble_version=ble_version,
-                firmware=fw_text,
-                firmware_ver=fw_num,
-                led_version=service[13],
-                mac=mac or (base.mac if base else ""),
-                power=base.power if base else None,
-                color_mode=base.color_mode if base else None,
-                rgb=base.rgb if base else None,
-                brightness_percent=base.brightness_percent if base else None,
-                color_temp_percent=base.color_temp_percent if base else None,
-                effect_id=base.effect_id if base else None,
-                company_id=base.company_id if base else (service[1] << 8) | service[2],
-            )
+    from .products import get_product
+
+    manufacturer = _manufacturer_block(dict(getattr(service_info, "manufacturer_data", None) or {}))
+    service = _service_identity(getattr(service_info, "service_data", None))
+    if service is not None:
+        product = get_product(service.product_id)
+        kind = product.kind if product is not None else ""
+        state = None
+        if manufacturer is not None:
+            state = _split_state(manufacturer[1], service.ble_version, kind)
+        parsed = Advertisement(
+            product_id=service.product_id,
+            ble_version=service.ble_version,
+            firmware=service.firmware,
+            firmware_ver=service.firmware_ver,
+            led_version=service.led_version,
+            mac=service.mac,
+            power=state.power if state else None,
+            color_mode=state.color_mode if state else None,
+            rgb=state.rgb if state else None,
+            brightness_percent=state.brightness_percent if state else None,
+            color_temp_percent=state.color_temp_percent if state else None,
+            effect_id=state.effect_id if state else None,
+            company_id=service.company_id,
+            hs=state.hs if state else None,
+        )
+    else:
+        parsed = parse_manufacturer_data(dict(getattr(service_info, "manufacturer_data", None) or {}))
     if parsed is None:
         return None
-    name = getattr(service_info, "name", None)
-    rssi = getattr(service_info, "rssi", None)
     return Advertisement(
         product_id=parsed.product_id,
         ble_version=parsed.ble_version,
@@ -187,8 +288,9 @@ def parse_service_info(service_info) -> Advertisement | None:
         color_temp_percent=parsed.color_temp_percent,
         effect_id=parsed.effect_id,
         company_id=parsed.company_id,
-        name=name,
-        rssi=rssi,
+        name=getattr(service_info, "name", None),
+        rssi=getattr(service_info, "rssi", None),
+        hs=parsed.hs,
     )
 
 

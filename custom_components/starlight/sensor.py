@@ -1,4 +1,4 @@
-"""Signal strength."""
+"""Signal strength and the last notification."""
 
 from __future__ import annotations
 
@@ -18,8 +18,9 @@ async def async_setup_entry(
     entry: ConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
-    """Set up the signal sensor."""
-    async_add_entities([RssiSensor(hass.data[DOMAIN][entry.entry_id])])
+    """Set up signal and last-notification sensors."""
+    device = hass.data[DOMAIN][entry.entry_id]
+    async_add_entities([RssiSensor(device), LastNotifySensor(device)])
 
 
 class RssiSensor(StarlightEntity, SensorEntity):
@@ -39,3 +40,22 @@ class RssiSensor(StarlightEntity, SensorEntity):
     @property
     def native_value(self) -> int | None:
         return self._device.state.rssi
+
+
+class LastNotifySensor(StarlightEntity, SensorEntity):
+    """Hex of the last GATT notification. Empty until the controller replies."""
+
+    _attr_translation_key = "last_notify"
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_icon = "mdi:message-reply-text"
+
+    def __init__(self, device) -> None:
+        super().__init__(device)
+        self._attr_unique_id = f"{device.address}_last_notify"
+
+    @property
+    def native_value(self) -> str | None:
+        value = self._device.state.last_notify
+        if value is not None and len(value) > 255:
+            return value[:255]
+        return value

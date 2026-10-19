@@ -20,6 +20,7 @@ from homeassistant.helpers.service import async_extract_config_entry_ids
 from .const import BLOCKED_EF, DOMAIN
 from .device import StarlightDevice
 from .protocol.advert import parse_service_info
+from .protocol.products import load_tables
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -37,6 +38,7 @@ CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
 
 async def async_setup(hass: HomeAssistant, config: dict) -> bool:
     """Register services once."""
+    await hass.async_add_executor_job(load_tables)
     hass.data.setdefault(DOMAIN, {})
 
     async def _devices(call) -> list[StarlightDevice]:
@@ -77,6 +79,7 @@ async def async_setup(hass: HomeAssistant, config: dict) -> bool:
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up one light."""
+    await hass.async_add_executor_job(load_tables)
     device = StarlightDevice(hass, entry)
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = device
 

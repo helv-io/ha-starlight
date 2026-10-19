@@ -43,7 +43,7 @@ from .const import (
     OPCODE_STATE_V2,
     WRITE_UUID,
 )
-from .protocol.advert import Advertisement
+from .protocol.advert import Advertisement, parse_stair_state
 from .protocol.products import Product, get_product
 from .protocol.rgb import (
     ADDRESSABLE_EFFECTS,
@@ -113,6 +113,7 @@ class RuntimeState:
     tab: str = "step"
     mode_key: str = "step"
     rssi: int | None = None
+    last_notify: str | None = None
     listeners: list[Listener] = field(default_factory=list)
 
 
@@ -148,11 +149,11 @@ class StarlightDevice:
 
     @property
     def kind(self) -> str:
-        """stair, addressable, rgb, rgbww, cct, or music."""
+        """stair, addressable, rgb, rgbww, or cct. Unknown ids stay RGB."""
         product = self.product
         if product is not None:
             return product.kind
-        return "stair" if self.product_id in (198, 532) else "rgb"
+        return "rgb"
 
     @property
     def model(self) -> str:
@@ -172,8 +173,8 @@ class StarlightDevice:
             return int(choice)
         if self.ble_version is not None:
             return header_version_for(self.ble_version)
-        # UNVERIFIED default: stair boards in the field are expected to be V1.
-        return 1 if self.kind == "stair" else 0
+        # bleVersion below 8, and an unknown version, uses the V0 header.
+        return 0
 
     @property
     def disconnect_delay(self) -> int:
@@ -230,7 +231,10 @@ class StarlightDevice:
             self.state.rssi = advert.rssi
         if advert.power is not None:
             self.state.is_on = advert.power
-        if advert.rgb is not None:
+        if advert.hs is not None:
+            self.state.hs = advert.hs
+            self.state.color_mode = "hs"
+        elif advert.rgb is not None:
             self.state.hs = rgb_to_hs(*advert.rgb)
             self.state.color_mode = "hs"
             self.state.effect = None
@@ -256,10 +260,11 @@ class StarlightDevice:
         table = ADDRESSABLE_EFFECTS if self.kind == "addressable" else SIMPLE_EFFECTS
         return table.get(effect_id)
 
-    def effect_options(self) -> list[str]:
-        """Effect names for the light and the select."""
+    def effect_options(self, *, tab_only: bool = False) -> list[str]:
+        """Effect names. The light lists every stair mode. The select stays on the tab."""
         if self.kind == "stair":
-            return [mode.label for mode in modes_for_tab(self.state.tab)]
+            modes = modes_for_tab(self.state.tab) if tab_only else STAIR_MODES
+            return [mode.label for mode in modes]
         names = [SOLID]
         table = ADDRESSABLE_EFFECTS if self.kind == "addressable" else SIMPLE_EFFECTS
         names.extend(table.values())
@@ -295,8 +300,8 @@ class StarlightDevice:
 
     @property
     def stair_mode(self) -> StairMode:
-        """Current stair mode, falling back to Step."""
-        return mode_by_key(self.state.mode_key) or STAIR_MODES[0]
+        """Current stair mode, falling back to Step by step."""
+        return mode_by_key(self.state.mode_key) or mode_by_key("step") or STAIR_MODES[0]
 
     async def async_shutdown(self) -> None:
         """Drop the link during unload."""
@@ -650,26 +655,28 @@ class StarlightDevice:
     @callback
     def _handle_notify(self, raw: bytes) -> None:
         opcode, payload = payload_from_notify(raw)
+        self.state.last_notify = raw.hex()
         _LOGGER.debug(
             "starlight <- %s opcode %s %s",
             self.address,
             None if opcode is None else f"{opcode:02X}",
             payload.hex(),
         )
-        if not payload:
-            return
-        if payload[0] == 0x81:
+        if payload and payload[0] == 0x81:
             self._apply_standard_state(payload)
             return
-        if self.kind == "stair" and opcode in (OPCODE_STATE, OPCODE_STATE_V2):
+        if payload and self.kind == "stair" and opcode in (OPCODE_STATE, OPCODE_STATE_V2):
             self._apply_stair_state(payload)
             return
-        if opcode in (OPCODE_STATE, OPCODE_STATE_V2) and payload:
+        if payload and opcode in (OPCODE_STATE, OPCODE_STATE_V2):
             self._apply_standard_state(payload)
+            return
+        self._notify()
 
     def _apply_standard_state(self, payload: bytes) -> None:
         parsed = parse_state_response(payload)
         if parsed is None:
+            self._notify()
             return
         self.state.is_on = bool(parsed["is_on"])
         if parsed["is_rgb"]:
@@ -688,23 +695,13 @@ class StarlightDevice:
         self._notify()
 
     def _apply_stair_state(self, payload: bytes) -> None:
-        """Apply a stair state upload.
-
-        UNVERIFIED: the app reads a 0x23 flag at byte 2. That flag is treated
-        as power here. A capture should confirm the offset.
-        """
-        if len(payload) < 3:
-            return
-        if payload[2] == 0x23:
-            self.state.is_on = True
-        elif payload[2] == 0x24:
-            self.state.is_on = False
-        if len(payload) >= 10:
-            packed = (payload[8] << 8) | payload[9]
-            hue = (packed >> 7) & 0x1FF
-            sat = packed & 0x7F
-            if hue <= 360 and sat <= 100:
-                self.state.hs = (float(hue), float(sat))
+        """Apply a stair state upload when the app's 0x23/0x24 flag is present."""
+        parsed = parse_stair_state(payload)
+        if parsed is not None:
+            power, hs = parsed
+            self.state.is_on = power
+            if hs is not None:
+                self.state.hs = hs
         self._notify()
 
 

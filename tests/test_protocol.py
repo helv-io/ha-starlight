@@ -7,8 +7,9 @@ from types import SimpleNamespace
 from custom_components.starlight.protocol.advert import (
     parse_manufacturer_data,
     parse_service_info,
+    parse_stair_state,
 )
-from custom_components.starlight.protocol.products import get_product
+from custom_components.starlight.protocol.products import get_product, known_product_ids
 from custom_components.starlight.protocol.rgb import (
     color_payload,
     effect_payload,
@@ -16,6 +17,8 @@ from custom_components.starlight.protocol.rgb import (
     state_query_payload,
 )
 from custom_components.starlight.protocol.stair import (
+    STAIR_MODES,
+    modes_for_tab,
     pack_color,
     stair_install,
     stair_mode,
@@ -66,14 +69,39 @@ def test_legacy_power_checksum() -> None:
     assert state_query_payload().hex() == "818a8b96"
 
 
-def test_stair_power_uses_v3_template() -> None:
-    """The stair products list switch_led_v3, so power uses that template."""
-    assert power_payload(get_product(532), True).hex() == "e001003b2300000000000000000000"
+def _all_products():
+    return [product for pid in known_product_ids() if (product := get_product(pid)) is not None]
+
+
+def _first(kind: str, predicate=None):
+    for product in _all_products():
+        if product.kind != kind:
+            continue
+        if predicate is None or predicate(product):
+            return product
+    raise AssertionError(f"no {kind} product matched")
+
+
+def test_stair_power_uses_app_form() -> None:
+    """Stair state protocols that list switch_led_v3 use the accepted power bytes."""
+    product = _first("stair", lambda item: item.supports("switch_led_v3"))
+    assert power_payload(product, True).hex() == "e001012300000000000000000000"
+    assert power_payload(product, False).hex() == "e001012400000000000000000000"
+
+
+def test_other_products_keep_v3_template() -> None:
+    """The shared switch_led_v3 template stays in place for non-stair products."""
+    product = _first("rgb", lambda item: item.supports("switch_led_v3"))
+    payload = power_payload(product, True).hex()
+    assert payload.startswith("e001")
+    assert "3b23" in payload
 
 
 def test_color_picks_form_for_old_firmware() -> None:
-    product = get_product(8)
-    assert product is not None and product.kind == "rgb"
+    product = _first(
+        "rgb",
+        lambda item: item.supports("colour_data") and item.supports("colour_data_v2"),
+    )
     old = color_payload(product, 255, 0, 0, 100, ble_version=3)
     assert old[0] == 0x31
     new = color_payload(product, 255, 0, 0, 100, ble_version=8)
@@ -82,12 +110,20 @@ def test_color_picks_form_for_old_firmware() -> None:
 
 
 def test_addressable_effect() -> None:
-    product = get_product(170)
-    assert product is not None and product.kind == "addressable"
+    product = _first("addressable")
     payload = effect_payload(product, 4, 50, 80)
     assert payload is not None
     assert payload[0] == 0x42
     assert payload[1] == 4
+
+
+def test_white_and_rgbw_products_exist() -> None:
+    """CCT and RGBWW rows are present and keep their table kind."""
+    cct = _first("cct")
+    rgbww = _first("rgbww")
+    assert "cct" in f"{cct.category} {cct.state}".lower() or cct.kind == "cct"
+    assert rgbww.kind == "rgbww"
+    assert cct.product_id != rgbww.product_id
 
 
 def test_stair_helpers() -> None:
@@ -97,12 +133,24 @@ def test_stair_helpers() -> None:
     install = stair_install(32)
     assert install[:2] == bytes((0xEF, 0x11))
     assert install[3] == 0 and install[4] == 32
+    assert len(STAIR_MODES) == 16
+    labels = [mode.label for mode in STAIR_MODES]
+    assert len(set(labels)) == len(labels)
+    by_key = {mode.key: mode for mode in STAIR_MODES}
+    assert by_key["full"].wire == 1 and by_key["full"].tab == "time"
+    assert by_key["step"].wire == 2 and by_key["single_step"].wire == 2
+    assert by_key["follow"].wire == 3 and by_key["three_follow"].wire == 3
+    assert by_key["two_step"].wire == 13 and by_key["single_follow"].wire == 14
+    assert {mode.tab for mode in modes_for_tab("stream")} == {"stream"}
+    full = stair_mode(0, 100, False, 1, pack_color(0, 100, 100))
+    assert full.hex() == "ef1000640024000101006464"
+    assert stair_mode(0, 100, False, 1, opcode=0x20)[:2] == bytes((0xEF, 0x20))
 
 
 def _format_b() -> bytes:
     data = bytearray(27)
     data[1] = 8
-    data[2:8] = bytes.fromhex("0865F01CE65B")
+    data[2:8] = bytes.fromhex("AABBCCDDEEFF")
     data[8] = 0x02
     data[9] = 0x14
     data[10] = 0x0C
@@ -118,7 +166,7 @@ def test_advert_format_b() -> None:
     assert advert is not None
     assert advert.product_id == 0x0214
     assert advert.ble_version == 8
-    assert advert.mac == "08:65:F0:1C:E6:5B"
+    assert advert.mac == "AA:BB:CC:DD:EE:FF"
     assert advert.firmware == "0C"
     assert advert.power is True
     assert advert.color_mode == "rgb"
@@ -134,33 +182,77 @@ def test_advert_accepts_5b_and_rejects_noise() -> None:
     assert parse_manufacturer_data({}) is None
 
 
-def test_service_data_identity() -> None:
+def test_ffff_service_data_is_not_identity() -> None:
+    """The GATT uuid is not an identity block. Family service data is."""
     service = bytearray(16)
     service[1] = 0x5A
     service[3] = 9
-    service[4:10] = bytes.fromhex("0865F01CE65B")
-    service[10] = 0x00
-    service[11] = 0xC6
-    service[12] = 0x04
+    service[10] = 0x02
+    service[11] = 0x14
     info = SimpleNamespace(
         manufacturer_data={},
         service_data={"0000ffff-0000-1000-8000-00805f9b34fb": bytes(service)},
         name="stair",
         rssi=-42,
     )
+    assert parse_service_info(info) is None
+
+
+def test_split_advert_identity() -> None:
+    """Service data is identity. The manufacturer value is state and must not win."""
+    state = bytes.fromhex("8023030000f03c645f645f01006420000f235f0103000500640000")
+    identity = bytes.fromhex("8007aabbccddeeff021415010101")
+    bogus = parse_manufacturer_data({0x5A02: state})
+    assert bogus is not None
+    info = SimpleNamespace(
+        manufacturer_data={0x5A02: state},
+        service_data={"00005a02-0000-1000-8000-00805f9b34fb": identity},
+        name="IOTBT65B",
+        rssi=-87,
+    )
     advert = parse_service_info(info)
     assert advert is not None
-    assert advert.product_id == 198
-    assert advert.ble_version == 9
-    assert advert.rssi == -42
+    assert advert.product_id == 0x0214
+    assert advert.product_id != bogus.product_id
+    assert advert.ble_version == 7
+    assert advert.mac == "AA:BB:CC:DD:EE:FF"
+    assert advert.firmware == "15"
+    assert advert.led_version == 1
+    assert advert.company_id == 0x5A02
+    assert advert.rssi == -87
+    assert advert.power is None
+    assert header_version_for(advert.ble_version) == 0
+    product = get_product(advert.product_id)
+    assert product is not None
+    assert product.kind == "stair"
+    assert "stair_16_32" in product.functions
+    assert product.channels == 32
+    assert parse_stair_state(state) is None
+    assert parse_stair_state(state[1:26]) is None
+
+
+def test_stair_state_flag() -> None:
+    record = bytearray(10)
+    record[2] = 0x24
+    record[8] = 0x00
+    record[9] = 0x64
+    assert parse_stair_state(bytes(record)) == (False, (0.0, 100.0))
 
 
 def test_product_table() -> None:
-    stair16 = get_product(198)
-    stair32 = get_product(532)
-    assert stair16 is not None and stair16.kind == "stair" and stair16.channels == 16
-    assert stair32 is not None and stair32.kind == "stair" and stair32.channels == 32
-    assert "stair_16_32" in stair32.functions
-    assert get_product(8) is not None
+    products = _all_products()
+    kinds = {product.kind for product in products}
+    assert {"stair", "rgb", "rgbww", "cct", "addressable"} <= kinds
+    stairs = [
+        product
+        for product in products
+        if "stair" in product.category.lower() or "stair" in product.state.lower()
+    ]
+    assert stairs
+    assert {product.kind for product in stairs} == {"stair"}
+    assert any(product.channels == 32 and "stair_16_32" in product.functions for product in stairs)
+    assert any(
+        product.channels == 16 and "stair_16_32" not in product.functions for product in stairs
+    )
     assert get_product(999999) is None
-    assert len(get_product(8).functions) > 5
+    assert len(_first("rgb").functions) > 5

@@ -61,6 +61,38 @@ def _form_from(raw: dict[str, Any]) -> CommandForm:
     )
 
 
+# The app's stair_16_32 function is the wide stair controller. A stair product
+# without that function is the 16-channel controller.
+_WIDE_STAIR_FUNCTION = "stair_16_32"
+_NARROW_STAIR_CHANNELS = 16
+_WIDE_STAIR_CHANNELS = 32
+
+
+def _is_stair(category: str, state: str, states: tuple[str, ...]) -> bool:
+    """True when the category or a state protocol is a stair light."""
+    return any("stair" in name.lower() for name in (category, state, *states))
+
+
+def _kind_for(raw: dict[str, Any], category: str, state: str, states: tuple[str, ...]) -> str:
+    """Kind from the product table.
+
+    Stair follows the category and state protocol. Every other kind is the
+    classification already stored from the full product database.
+    """
+    if _is_stair(category, state, states):
+        return "stair"
+    return raw.get("kind") or "rgb"
+
+
+def _channels_for(kind: str, functions: frozenset[str], stored: int) -> int:
+    """Channel count. Stairs come from the function list, not a model id."""
+    if kind != "stair":
+        return stored
+    if _WIDE_STAIR_FUNCTION in functions:
+        return _WIDE_STAIR_CHANNELS
+    return _NARROW_STAIR_CHANNELS
+
+
 @lru_cache(maxsize=1)
 def _load() -> tuple[dict[int, Product], dict[str, CommandForm]]:
     products_raw = json.loads((_DATA / "products.json").read_text(encoding="utf-8"))
@@ -69,21 +101,31 @@ def _load() -> tuple[dict[int, Product], dict[str, CommandForm]]:
     products: dict[int, Product] = {}
     for key, raw in products_raw.items():
         forms = {name: _form_from(spec) for name, spec in (raw.get("forms") or {}).items()}
+        category = raw.get("category") or ""
+        state = raw.get("state") or ""
+        states = tuple(raw.get("states") or ())
+        functions = frozenset(raw.get("functions") or ())
+        kind = _kind_for(raw, category, state, states)
         products[int(key)] = Product(
             product_id=int(key),
-            kind=raw.get("kind") or "rgb",
+            kind=kind,
             model=raw.get("model") or "Color light",
-            category=raw.get("category") or "",
-            state=raw.get("state") or "",
-            states=tuple(raw.get("states") or ()),
-            functions=frozenset(raw.get("functions") or ()),
+            category=category,
+            state=state,
+            states=states,
+            functions=functions,
             music=bool(raw.get("music")),
             ble=bool(raw.get("ble")),
-            channels=int(raw.get("channels") or 0),
+            channels=_channels_for(kind, functions, int(raw.get("channels") or 0)),
             forms=forms,
             min_fw={str(k): int(v) for k, v in (raw.get("min_fw") or {}).items()},
         )
     return products, global_forms
+
+
+def load_tables() -> None:
+    """Read the product and command tables. Call this off the event loop."""
+    _load()
 
 
 def get_product(product_id: int | None) -> Product | None:

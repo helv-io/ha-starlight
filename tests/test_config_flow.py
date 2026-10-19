@@ -35,7 +35,7 @@ def _bluetooth_dependencies():
 def _payload() -> bytes:
     data = bytearray(27)
     data[1] = 8
-    data[2:8] = bytes.fromhex("0865F01CE65B")
+    data[2:8] = bytes.fromhex("AABBCCDDEEFF")
     data[8] = 0x02
     data[9] = 0x14
     data[10] = 0x0C
@@ -55,7 +55,7 @@ def _advert(name: str, manufacturer_data: dict[int, bytes]) -> AdvertisementData
     )
 
 
-def _info(address: str = "08:65:F0:1C:E6:5B", name: str = "Stair") -> BluetoothServiceInfoBleak:
+def _info(address: str = "AA:BB:CC:DD:EE:FF", name: str = "Stair") -> BluetoothServiceInfoBleak:
     return BluetoothServiceInfoBleak.from_device_and_advertisement_data(
         BLEDevice(address, name, {}),
         _advert(name, {0x5A01: _payload()}),
@@ -79,8 +79,42 @@ async def test_bluetooth_discovery_creates_entry(hass) -> None:
     assert result["step_id"] == "bluetooth_confirm"
     result = await hass.config_entries.flow.async_configure(result["flow_id"], {})
     assert result["type"] is FlowResultType.CREATE_ENTRY
-    assert result["data"][CONF_ADDRESS] == "08:65:F0:1C:E6:5B"
-    assert result["data"][CONF_PRODUCT_ID] == 532
+    assert result["data"][CONF_ADDRESS] == "AA:BB:CC:DD:EE:FF"
+    assert result["data"][CONF_PRODUCT_ID] == 0x0214
+
+
+def _split_info() -> BluetoothServiceInfoBleak:
+    """Manufacturer block is state. Service data carries the product."""
+    state = bytes.fromhex("8023030000f03c645f645f01006420000f235f0103000500640000")
+    identity = bytes.fromhex("8007aabbccddeeff021415010101")
+    return BluetoothServiceInfoBleak.from_device_and_advertisement_data(
+        BLEDevice("AA:BB:CC:DD:EE:01", "IOTBT65B", {}),
+        AdvertisementData(
+            local_name="IOTBT65B",
+            manufacturer_data={0x5A02: state},
+            service_data={"00005a02-0000-1000-8000-00805f9b34fb": identity},
+            service_uuids=[],
+            tx_power=None,
+            rssi=-87,
+            platform_data=(),
+        ),
+        "esphome",
+        0.0,
+        True,
+    )
+
+
+async def test_split_advert_discovers_stair(hass) -> None:
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN, context={"source": SOURCE_BLUETOOTH}, data=_split_info()
+    )
+    assert result["type"] is FlowResultType.FORM
+    assert result["description_placeholders"]["model"] == "Stair light 32"
+    result = await hass.config_entries.flow.async_configure(result["flow_id"], {})
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert result["data"][CONF_PRODUCT_ID] == 0x0214
+    assert result["data"]["ble_version"] == 7
+    assert result["data"]["firmware"] == "15"
 
 
 async def test_bluetooth_discovery_rejects_other_devices(hass) -> None:
