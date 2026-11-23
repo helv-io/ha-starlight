@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from .products import Product
 from .rgb import parse_state_response
 from .stair import TAB_LABELS, StairMode, mode_by_wire, tab_by_index
-from .symphony import MODE_EFFECT, MODE_MUSIC, MODE_STATIC, find_state, is_symphony
+from .symphony import MODE_EFFECT, MODE_MUSIC, MODE_STATIC, MUSIC_MODES, find_state, is_symphony
 
 # parseWifiBleV2StairLightData reads a 0x23/0x24 flag at byte 2. The header
 # in front of that record is not fixed, so the record is located by the flag.
@@ -39,6 +39,7 @@ class DecodedState:
     color_temp: bool = False
     effect_speed: int | None = None
     mic: bool | None = None
+    music_mode: int | None = None
 
     @property
     def known(self) -> bool:
@@ -128,6 +129,8 @@ def _decode_symphony(data: bytes) -> DecodedState:
         decoded.mic = False
     elif parsed.mode == MODE_MUSIC:
         decoded.mic = True
+        if parsed.effect_id in MUSIC_MODES:
+            decoded.music_mode = parsed.effect_id
     return decoded
 
 

@@ -56,6 +56,9 @@
       },
       "music_mode": {
         "name": "Music mode"
+      },
+      "timer": {
+        "name": "Timer"
       }
     },
     "number": {

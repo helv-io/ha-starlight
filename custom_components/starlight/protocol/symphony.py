@@ -80,6 +80,12 @@ PALETTES: dict[str, tuple[tuple[int, int], ...]] = {
     "Red and green": ((0, 100), (120, 100)),
     "Blue and white": ((225, 100), (0, 0)),
     "Gold": ((40, 100), (30, 90)),
+    # Holiday themes from the tree's IR remote. The app ships no fixed colors
+    # for these, so they follow the remote's button art.
+    "Patriotic": ((0, 100), (0, 0), (225, 100)),
+    "Candy Cane": ((0, 100), (0, 0)),
+    "Halloween": ((25, 100), (270, 100)),
+    "Cool white": ((210, 8),),
     CURRENT_COLOR: (),
 }
 DEFAULT_PALETTE = "Christmas"
@@ -87,6 +93,112 @@ DEFAULT_MUSIC_MODE = 1
 
 DIRECTION_FORWARD = 0x01
 DEFAULT_DENSITY = 50
+
+
+# Remote-style "AUTO": the driver walks the moving effects in turn.
+AUTO = "Auto"
+AUTO_INTERVAL = 30
+AUTO_EFFECTS: tuple[int, ...] = tuple(i for i in EFFECTS if i < 100)
+
+# Hardware timers. The app's get_timer_list_v2 is ``E0 06`` and the controller
+# holds six slots. The driver owns slots 5 and 6 so app timers in 1-4 survive.
+TIMER_QUERY = b"\xe0\x06"
+TIMER_SLOT_ON = 5
+TIMER_SLOT_OFF = 6
+REPEAT_ONCE = 0x00
+REPEAT_DAILY = 0xFE
+TIMER_OFF = "Off"
+TIMER_6H = "Off in 6 hours"
+TIMER_8H = "Off in 8 hours"
+TIMER_DAILY = "6 hours on, 18 off, daily"
+TIMER_OPTIONS: tuple[str, ...] = (TIMER_OFF, TIMER_6H, TIMER_8H, TIMER_DAILY)
+_ACTION_ON = 0x23
+_ACTION_OFF = 0x24
+
+
+def set_time_payload(when) -> bytes:
+    """App ``set_time``: ``10 14 YY MM DD hh mm ss WD 00`` plus checksum."""
+    body = bytes(
+        (
+            0x10,
+            0x14,
+            when.year % 100,
+            when.month,
+            when.day,
+            when.hour,
+            when.minute,
+            when.second,
+            when.isoweekday(),
+            0x00,
+        )
+    )
+    return body + bytes((sum(body) & 0xFF,))
+
+
+def timer_slot_payload(slot: int, hour: int, minute: int, repeat: int, on: bool) -> bytes:
+    """``E0 05 SS`` and a 20-byte record that runs a power command.
+
+    Record: ``F0 hh mm 00 RP 0E E0 01 00 AC`` then zeros, where AC is 23 for
+    on and 24 for off. A live tree stored it, echoed it in ``E0 06`` and
+    switched off at the set minute.
+    """
+    record = bytearray(20)
+    record[0] = 0xF0
+    record[1] = hour % 24
+    record[2] = minute % 60
+    record[4] = repeat & 0xFF
+    record[5:10] = bytes((0x0E, 0xE0, 0x01, 0x00, _ACTION_ON if on else _ACTION_OFF))
+    return bytes((0xE0, 0x05, slot)) + bytes(record)
+
+
+def clear_slot_payload(slot: int) -> bytes:
+    """An all-zero record empties the slot."""
+    return bytes((0xE0, 0x05, slot)) + bytes(20)
+
+
+@dataclass(frozen=True)
+class TimerSlot:
+    """One stored hardware timer."""
+
+    slot: int
+    hour: int
+    minute: int
+    repeat: int
+    on: bool
+
+
+def parse_timers(data: bytes) -> dict[int, TimerSlot] | None:
+    """Parse an ``E0 06`` reply. Empty slots are 7 bytes, set ones 21."""
+    index = data.find(TIMER_QUERY)
+    if index < 0:
+        return None
+    body = data[index + 2 :]
+    slots: dict[int, TimerSlot] = {}
+    pos = 0
+    while pos < len(body):
+        slot = body[pos]
+        if not 1 <= slot <= 6:
+            break
+        if pos + 1 < len(body) and body[pos + 1] == 0xF0 and pos + 21 <= len(body):
+            rec = body[pos + 1 : pos + 21]
+            slots[slot] = TimerSlot(slot, rec[1], rec[2], rec[4], rec[9] == _ACTION_ON)
+            pos += 21
+        else:
+            pos += 7
+    return slots
+
+
+def timer_option(slots: dict[int, TimerSlot], remembered: str) -> str:
+    """Which timer choice the driver's slots describe."""
+    on = slots.get(TIMER_SLOT_ON)
+    off = slots.get(TIMER_SLOT_OFF)
+    if off is None:
+        return TIMER_OFF
+    if on is not None and on.repeat == REPEAT_DAILY and off.repeat == REPEAT_DAILY:
+        return TIMER_DAILY
+    if remembered in (TIMER_6H, TIMER_8H):
+        return remembered
+    return TIMER_6H
 
 
 def is_symphony(product: Product | None) -> bool:
@@ -214,6 +326,9 @@ def find_state(data: bytes) -> SymphonyState | None:
 
 
 __all__ = [
+    "AUTO",
+    "AUTO_EFFECTS",
+    "AUTO_INTERVAL",
     "CURRENT_COLOR",
     "DEFAULT_MUSIC_MODE",
     "DEFAULT_PALETTE",
@@ -224,6 +339,13 @@ __all__ = [
     "MUSIC_MODES",
     "PALETTES",
     "SymphonyState",
+    "TIMER_OPTIONS",
+    "TimerSlot",
+    "clear_slot_payload",
+    "parse_timers",
+    "set_time_payload",
+    "timer_option",
+    "timer_slot_payload",
     "color_record",
     "effect_payload",
     "find_state",

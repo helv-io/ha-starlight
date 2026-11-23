@@ -6,6 +6,7 @@ after each command was sent.
 
 from __future__ import annotations
 
+import asyncio
 import json
 from unittest.mock import patch
 
@@ -216,3 +217,152 @@ async def test_density_reaches_effect(hass) -> None:
     await device.async_set_density(80)
     assert sent[-1][:2] == bytes.fromhex("e121")
     assert sent[-1][7] == 80
+
+
+# Captured from the tree: E0 06 with no timers, and after slot 6 was written.
+TIMERS_EMPTY = (
+    "E00601"
+    + "000000000000"
+    + "02"
+    + "000000000000"
+    + "03"
+    + "000000000000"
+    + ("04" + "000000000000" + "05" + "000000000000" + "06" + "000000000000")
+)
+TIMERS_SLOT6_OFF = (
+    "E006010000000000000200000000000003000000000000040000000000000500000000000006"
+    "F0080800FE0EE001002400000000000000000000"
+)
+# Music mode picked on the IR remote: mode 0x62, id 6.
+MUSIC_FROM_REMOTE = "EA810000C50823620632006D326400000001150000000146010015"
+
+
+def test_timer_payloads_match_capture() -> None:
+    payload = symphony.timer_slot_payload(6, 8, 8, symphony.REPEAT_DAILY, False)
+    assert payload.hex() == "e00506f0080800fe0ee001002400000000000000000000"
+    assert symphony.clear_slot_payload(6).hex() == "e00506" + "00" * 20
+
+
+def test_set_time_matches_capture() -> None:
+    from datetime import datetime
+
+    payload = symphony.set_time_payload(datetime(2026, 11, 23, 8, 5, 57))
+    assert payload.hex() == "10141a0b170805390100a7"
+
+
+def test_parse_timers() -> None:
+    assert symphony.parse_timers(bytes.fromhex(TIMERS_EMPTY)) == {}
+    slots = symphony.parse_timers(bytes.fromhex(TIMERS_SLOT6_OFF))
+    assert slots == {6: symphony.TimerSlot(6, 8, 8, 0xFE, False)}
+    assert symphony.timer_option(slots, symphony.TIMER_OFF) == symphony.TIMER_6H
+    daily = dict(slots)
+    daily[5] = symphony.TimerSlot(5, 2, 8, 0xFE, True)
+    assert symphony.timer_option(daily, symphony.TIMER_OFF) == symphony.TIMER_DAILY
+    assert symphony.timer_option({}, symphony.TIMER_DAILY) == symphony.TIMER_OFF
+
+
+async def test_timer_select_programs_slots(hass) -> None:
+    await hass.async_add_executor_job(load_tables)
+    device = _device(hass)
+    device.state.is_on = True
+    sent: list[bytes] = []
+
+    async def _send(payload, opcode):
+        sent.append(payload)
+        return payload
+
+    device._send = _send
+    await device.async_set_timer(symphony.TIMER_DAILY)
+    assert sent[0][:2] == bytes.fromhex("1014")
+    assert sent[1][:3] == bytes.fromhex("e00505") and sent[1][12] == 0x23
+    assert sent[2][:3] == bytes.fromhex("e00506") and sent[2][12] == 0x24
+    assert (sent[2][4] - sent[1][4]) % 24 == 6
+    assert sent[-1] == symphony.TIMER_QUERY
+    await device.async_set_timer(symphony.TIMER_OFF)
+    assert bytes.fromhex("e00505" + "00" * 20) in sent
+    device._handle_notify(_notify(TIMERS_SLOT6_OFF, 9))
+    assert device.state.timers == {6: "08:08 off daily"}
+
+
+async def test_remote_music_mode_is_read_back(hass) -> None:
+    await hass.async_add_executor_job(load_tables)
+    device = _device(hass)
+    device._handle_notify(_notify(MUSIC_FROM_REMOTE, 1))
+    assert device.state.mic is True
+    assert device.state.music_mode == 6
+
+
+async def test_holiday_palettes_and_white(hass) -> None:
+    await hass.async_add_executor_job(load_tables)
+    device = _device(hass)
+    for name in ("Christmas", "Patriotic", "Candy Cane", "Halloween", "Cool white"):
+        assert name in symphony.PALETTES
+    assert symphony.palette_colors("Candy Cane", (0.0, 0.0)) == [(0.0, 100.0), (0.0, 0.0)]
+    assert device.supports_color_temp
+    sent: list[bytes] = []
+
+    async def _send(payload, opcode):
+        sent.append(payload)
+        return payload
+
+    device._send = _send
+    await device.async_set_mic(True)
+    await device.async_turn_on(color_temp_kelvin=2700)
+    assert sent[-1][:2] == bytes.fromhex("3ba1")
+    assert device.state.mic is False
+    assert device.state.color_mode == "color_temp"
+    # The tree reads back hue 35 / sat 64 for 2700 K; CT mode stays.
+    from homeassistant.util import color as color_util
+
+    hue, sat = color_util.color_temperature_to_hs(2700)
+    packed = (round(hue) << 7) | round(sat)
+    frame = "EA810000C5082324145000" + f"{packed:04X}" + "6400000001150000000146010015"
+    device._handle_notify(_notify(frame, 6))
+    assert device.state.color_mode == "color_temp"
+    device._handle_notify(_notify(STATIC_BLUE_248, 7))
+    assert device.state.color_mode == "hs"
+
+
+async def test_auto_cycles_effects(hass) -> None:
+    await hass.async_add_executor_job(load_tables)
+    device = _device(hass)
+    assert symphony.AUTO in device.effect_options()
+    sent: list[bytes] = []
+
+    async def _send(payload, opcode):
+        sent.append(payload)
+        return payload
+
+    device._send = _send
+    with patch.object(symphony, "AUTO_INTERVAL", 0.01):
+        await device.async_turn_on(effect=symphony.AUTO)
+        assert sent[-1][:2] == bytes.fromhex("e121") and sent[-1][4] == 1
+        await asyncio.sleep(0.05)
+        ids = {p[4] for p in sent if p[:2] == bytes.fromhex("e121")}
+        assert len(ids) > 1
+        # A real effect readback keeps Auto selected.
+        device._handle_notify(_notify("EA810000C50823250250007C646400000001150000000146010015", 5))
+        assert device.state.effect == symphony.AUTO
+        await device.async_turn_off()
+        count = len(sent)
+        await asyncio.sleep(0.05)
+        assert len(sent) == count
+
+
+async def test_stale_upload_after_command_is_ignored(hass) -> None:
+    await hass.async_add_executor_job(load_tables)
+    device = _device(hass)
+    sent: list[bytes] = []
+
+    async def _send(payload, opcode):
+        sent.append(payload)
+        return payload
+
+    device._send = _send
+    await device.async_turn_on(effect=symphony.AUTO)
+    # The tree first answers with the static state it had before the command.
+    device._handle_notify(_notify(STATIC_BLUE_248, 1))
+    assert device.state.effect == symphony.AUTO
+    device._handle_notify(_notify("EA810000C50823250150007C646400000001150000000146010015", 2))
+    assert device.state.effect == symphony.AUTO
+    await device.async_turn_off()

@@ -13,6 +13,7 @@ import colorsys
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from datetime import timedelta
 
 from bleak.exc import BleakError
 from bleak_retry_connector import BleakClientWithServiceCache, establish_connection
@@ -21,6 +22,8 @@ from homeassistant.const import CONF_ADDRESS, CONF_NAME
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.device_registry import CONNECTION_BLUETOOTH, DeviceInfo
+from homeassistant.util import color as color_util
+from homeassistant.util import dt as dt_util
 
 from .const import (
     BANNED_NAME_PARTS,
@@ -77,6 +80,9 @@ from .protocol.transport import build_frame, header_version_for, payload_from_no
 
 _LOGGER = logging.getLogger(__name__)
 
+# Seconds to wait for a symphony upload that shows the commanded mode.
+EXPECT_WINDOW = 3.0
+
 Listener = Callable[[], None]
 
 
@@ -106,6 +112,8 @@ class RuntimeState:
     palette: str = symphony.DEFAULT_PALETTE
     music_mode: int = symphony.DEFAULT_MUSIC_MODE
     effect_density: int = symphony.DEFAULT_DENSITY
+    timer: str = symphony.TIMER_OFF
+    timers: dict = field(default_factory=dict)
     remember: bool = False
     induction: bool = False
     slow_open: bool = False
@@ -143,6 +151,13 @@ class StarlightDevice:
         self._timer: asyncio.TimerHandle | None = None
         self._queried = False
         self._closing = False
+        self._auto_task: asyncio.Task | None = None
+        # Symphony replies to a command with the state from before it. Until
+        # the expected mode shows up (or a short window passes), other modes
+        # are stale and ignored.
+        self._expect_mode: int | None = None
+        self._expect_until = 0.0
+        self._auto_index = 0
         product = self.product
         if product is not None and product.kind == "stair":
             self.state.stair_count = product.channels or 16
@@ -256,7 +271,7 @@ class StarlightDevice:
         if advert.color_mode == "cct" and advert.color_temp_percent is not None:
             self.state.color_temp = percent_to_kelvin(advert.color_temp_percent)
             self.state.color_mode = "color_temp"
-        if advert.effect_id is not None:
+        if advert.effect_id is not None and not self._auto_holds(advert.effect_id):
             self.state.effect = self._effect_name(advert.effect_id)
         self._notify()
 
@@ -287,6 +302,8 @@ class StarlightDevice:
             return [mode.label for mode in modes]
         names = [SOLID]
         names.extend(self._effect_table().values())
+        if self.is_symphony:
+            names.append(symphony.AUTO)
         if self.supports_music:
             names.append(MICROPHONE)
         return names
@@ -299,8 +316,8 @@ class StarlightDevice:
 
     @property
     def supports_color_temp(self) -> bool:
-        """True for white and RGBWW products."""
-        return self.kind in ("cct", "rgbww")
+        """True for white and RGBWW products. Symphony trees mix white from RGB."""
+        return self.kind in ("cct", "rgbww") or self.is_symphony
 
     @property
     def supports_color(self) -> bool:
@@ -325,6 +342,7 @@ class StarlightDevice:
     async def async_shutdown(self) -> None:
         """Drop the link during unload."""
         self._closing = True
+        self._stop_auto()
         if self._timer is not None:
             self._timer.cancel()
             self._timer = None
@@ -344,6 +362,10 @@ class StarlightDevice:
             self.state.color_temp = kwargs["color_temp_kelvin"]
             self.state.color_mode = "color_temp"
             self.state.effect = None
+        if self.is_symphony and self.state.effect is None and not kwargs.get("effect"):
+            if kwargs.get("hs_color") is not None or kwargs.get("color_temp_kelvin") is not None:
+                # A plain color leaves music mode, as the app's color wheel does.
+                self.state.mic = False
         if kwargs.get("effect"):
             self._set_effect_local(kwargs["effect"])
         self._notify()
@@ -357,6 +379,8 @@ class StarlightDevice:
     async def async_turn_off(self) -> None:
         """Switch the light off."""
         self.state.is_on = False
+        self._stop_auto()
+        self._expect_mode = None
         self._notify()
         opcode = OPCODE_STAIR if self.kind == "stair" else OPCODE_COMMAND
         await self._send(power_payload(self.product, False), opcode)
@@ -475,6 +499,117 @@ class StarlightDevice:
         self._notify()
         await self._send_visual()
 
+    def _visual_mode(self) -> int:
+        if self.state.mic or self.state.effect == MICROPHONE:
+            return symphony.MODE_MUSIC
+        if self.state.effect == symphony.AUTO or self._effect_id() is not None:
+            return symphony.MODE_EFFECT
+        return symphony.MODE_STATIC
+
+    def _expect(self, mode: int) -> None:
+        self._expect_mode = mode
+        self._expect_until = self.hass.loop.time() + EXPECT_WINDOW
+
+    def _is_stale(self, payload: bytes) -> bool:
+        """True for a symphony upload that predates the last command."""
+        if self._expect_mode is None:
+            return False
+        if self.hass.loop.time() > self._expect_until:
+            self._expect_mode = None
+            return False
+        parsed = symphony.find_state(payload)
+        if parsed is None:
+            return False
+        if parsed.mode == self._expect_mode:
+            self._expect_mode = None
+            return False
+        return True
+
+    def _auto_holds(self, effect_id: int) -> bool:
+        """While Auto runs, the tree reports whichever effect is on; keep Auto."""
+        return self.state.effect == symphony.AUTO and effect_id in symphony.AUTO_EFFECTS
+
+    def _matches_white(self, hs: tuple[float, float]) -> bool:
+        """True when a symphony readback is the white we mixed, so CT mode stays."""
+        if not self.is_symphony or self.state.color_mode != "color_temp":
+            return False
+        kelvin = max(MIN_KELVIN, min(MAX_KELVIN, self.state.color_temp or 4000))
+        hue, sat = color_util.color_temperature_to_hs(kelvin)
+        if hs[1] < 3:
+            return sat < 3
+        return abs(hs[0] - hue) <= 6 and abs(hs[1] - sat) <= 6
+
+    def _auto_payload(self) -> bytes:
+        ids = symphony.AUTO_EFFECTS
+        effect_id = ids[self._auto_index % len(ids)]
+        return symphony.effect_payload(
+            effect_id,
+            self.state.effect_speed,
+            brightness_to_percent(self.state.brightness),
+            self._palette_colors(),
+            density=self.state.effect_density,
+        )
+
+    def _start_auto(self) -> None:
+        if self._auto_task is None or self._auto_task.done():
+            self._auto_task = self.hass.async_create_background_task(
+                self._auto_loop(), f"starlight auto {self.address}"
+            )
+
+    def _stop_auto(self) -> None:
+        if self._auto_task is not None and not self._auto_task.done():
+            self._auto_task.cancel()
+        self._auto_task = None
+
+    async def _auto_loop(self) -> None:
+        """Step through the moving effects while Auto is selected."""
+        while True:
+            await asyncio.sleep(symphony.AUTO_INTERVAL)
+            if self._closing or not self.state.is_on or self.state.effect != symphony.AUTO:
+                return
+            self._auto_index += 1
+            try:
+                await self._send(self._auto_payload(), OPCODE_COMMAND)
+            except HomeAssistantError:
+                _LOGGER.debug("Auto step failed for %s", self.address)
+
+    async def async_set_timer(self, option: str) -> None:
+        """Program the controller's own timers like the remote's timer keys.
+
+        The clock is set first. Off in N hours stores a one-shot off. The
+        daily choice stores an everyday on now and an everyday off six hours
+        later. Off clears the driver's two slots.
+        """
+        if option not in symphony.TIMER_OPTIONS:
+            raise HomeAssistantError(f"Unknown timer {option}")
+        now = dt_util.now()
+        await self._send(symphony.set_time_payload(now), OPCODE_COMMAND)
+        on_slot, off_slot = symphony.TIMER_SLOT_ON, symphony.TIMER_SLOT_OFF
+        if option == symphony.TIMER_OFF:
+            await self._send(symphony.clear_slot_payload(on_slot), OPCODE_COMMAND)
+            await self._send(symphony.clear_slot_payload(off_slot), OPCODE_COMMAND)
+        else:
+            hours = {symphony.TIMER_6H: 6, symphony.TIMER_8H: 8, symphony.TIMER_DAILY: 6}[option]
+            end = now + timedelta(hours=hours)
+            if option == symphony.TIMER_DAILY:
+                repeat = symphony.REPEAT_DAILY
+                await self._send(
+                    symphony.timer_slot_payload(on_slot, now.hour, now.minute, repeat, True),
+                    OPCODE_COMMAND,
+                )
+            else:
+                repeat = symphony.REPEAT_ONCE
+                await self._send(symphony.clear_slot_payload(on_slot), OPCODE_COMMAND)
+            await self._send(
+                symphony.timer_slot_payload(off_slot, end.hour, end.minute, repeat, False),
+                OPCODE_COMMAND,
+            )
+            if not self.state.is_on:
+                await self.async_turn_on()
+        self.state.timer = option
+        self._notify()
+        await self._send(symphony.TIMER_QUERY, OPCODE_COMMAND)
+
     def _palette_colors(self) -> list[tuple[float, float]]:
         return symphony.palette_colors(self.state.palette, self.state.hs)
 
@@ -546,6 +681,9 @@ class StarlightDevice:
         percent = brightness_to_percent(self.state.brightness)
         red, green, blue = ha_hs_to_rgb(*self.state.hs)
         if self.is_symphony:
+            if self.state.effect != symphony.AUTO:
+                self._stop_auto()
+            self._expect(self._visual_mode())
             if self.state.mic or self.state.effect == MICROPHONE:
                 payload = symphony.music_payload(
                     self.state.music_mode,
@@ -566,6 +704,13 @@ class StarlightDevice:
                 )
                 await self._send(payload, OPCODE_COMMAND)
                 return
+            if self.state.effect == symphony.AUTO:
+                await self._send(self._auto_payload(), OPCODE_COMMAND)
+                self._start_auto()
+                return
+            if self.state.color_mode == "color_temp":
+                kelvin = max(MIN_KELVIN, min(MAX_KELVIN, self.state.color_temp or 4000))
+                red, green, blue = ha_hs_to_rgb(*color_util.color_temperature_to_hs(kelvin))
         if self.state.mic or self.state.effect == MICROPHONE:
             await self._send(
                 music_payload(
@@ -586,7 +731,7 @@ class StarlightDevice:
             if payload is not None:
                 await self._send(payload, OPCODE_COMMAND)
                 return
-        if self.state.color_mode == "color_temp" and self.supports_color_temp:
+        if self.state.color_mode == "color_temp" and self.kind in ("cct", "rgbww"):
             kelvin = self.state.color_temp or 4000
             kelvin = max(MIN_KELVIN, min(MAX_KELVIN, kelvin))
             payload = white_payload(
@@ -739,6 +884,18 @@ class StarlightDevice:
             None if opcode is None else f"{opcode:02X}",
             payload.hex(),
         )
+        if self.is_symphony and payload:
+            slots = symphony.parse_timers(payload)
+            if slots is not None:
+                self.state.timers = {
+                    n: f"{t.hour:02d}:{t.minute:02d} {'on' if t.on else 'off'}"
+                    + (" daily" if t.repeat == symphony.REPEAT_DAILY else "")
+                    for n, t in slots.items()
+                }
+                self.state.timer = symphony.timer_option(slots, self.state.timer)
+        if self.is_symphony and payload and self._is_stale(payload):
+            _LOGGER.debug("starlight %s ignoring stale upload", self.address)
+            return
         decoded = decode_payload(payload, self.product) if payload else DecodedState()
         if not decoded.known:
             fields = dict(self.state.last_fields)
@@ -778,8 +935,9 @@ class StarlightDevice:
             if self.kind != "stair":
                 self.state.effect = None
         elif decoded.hs is not None:
-            self.state.hs = decoded.hs
-            self.state.color_mode = "hs"
+            if not self._matches_white(decoded.hs):
+                self.state.hs = decoded.hs
+                self.state.color_mode = "hs"
             if self.kind != "stair":
                 self.state.effect = None
         if decoded.color_temp:
@@ -792,8 +950,13 @@ class StarlightDevice:
             effect = decoded.stair_mode.label
         elif decoded.tab is not None:
             self.state.tab = decoded.tab
+        if decoded.music_mode is not None:
+            self.state.music_mode = decoded.music_mode
         if decoded.effect_id is not None:
             name = self._effect_name(decoded.effect_id)
+            if self._auto_holds(decoded.effect_id):
+                name = None
+                effect = symphony.AUTO
             if name:
                 self.state.effect = name
                 effect = name
