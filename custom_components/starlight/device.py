@@ -41,6 +41,7 @@ from .const import (
     OPCODE_STAIR,
     WRITE_UUID,
 )
+from .protocol import symphony
 from .protocol.advert import Advertisement
 from .protocol.products import Product, get_product
 from .protocol.rgb import (
@@ -102,6 +103,9 @@ class RuntimeState:
     effect_speed: int = 50
     mic: bool = False
     mic_sensitivity: int = 50
+    palette: str = symphony.DEFAULT_PALETTE
+    music_mode: int = symphony.DEFAULT_MUSIC_MODE
+    effect_density: int = symphony.DEFAULT_DENSITY
     remember: bool = False
     induction: bool = False
     slow_open: bool = False
@@ -263,9 +267,18 @@ class StarlightDevice:
         data[CONF_FIRMWARE] = self.firmware
         self.hass.config_entries.async_update_entry(self.entry, data=data)
 
+    @property
+    def is_symphony(self) -> bool:
+        """True for hc-category controllers that use the E1 21 effect family."""
+        return symphony.is_symphony(self.product)
+
+    def _effect_table(self) -> dict[int, str]:
+        if self.is_symphony:
+            return symphony.EFFECTS
+        return ADDRESSABLE_EFFECTS if self.kind == "addressable" else SIMPLE_EFFECTS
+
     def _effect_name(self, effect_id: int) -> str | None:
-        table = ADDRESSABLE_EFFECTS if self.kind == "addressable" else SIMPLE_EFFECTS
-        return table.get(effect_id)
+        return self._effect_table().get(effect_id)
 
     def effect_options(self, *, tab_only: bool = False) -> list[str]:
         """Effect names. The light lists every stair mode. The select stays on the tab."""
@@ -273,8 +286,7 @@ class StarlightDevice:
             modes = modes_for_tab(self.state.tab) if tab_only else STAIR_MODES
             return [mode.label for mode in modes]
         names = [SOLID]
-        table = ADDRESSABLE_EFFECTS if self.kind == "addressable" else SIMPLE_EFFECTS
-        names.extend(table.values())
+        names.extend(self._effect_table().values())
         if self.supports_music:
             names.append(MICROPHONE)
         return names
@@ -425,6 +437,9 @@ class StarlightDevice:
         if enabled:
             self.state.effect = MICROPHONE
             self.state.is_on = True
+        elif self.state.effect == MICROPHONE:
+            # Leaving music mode returns to the plain color.
+            self.state.effect = None
         self._notify()
         await self._send_visual()
 
@@ -434,6 +449,34 @@ class StarlightDevice:
         self._notify()
         if self.state.mic:
             await self._send_visual()
+
+    async def async_set_palette(self, palette: str) -> None:
+        """Pick the colors that effects and music use, then resend."""
+        if palette not in symphony.PALETTES:
+            raise HomeAssistantError(f"Unknown palette {palette}")
+        self.state.palette = palette
+        self._notify()
+        if self.state.is_on and (self.state.mic or self._effect_id() is not None):
+            await self._send_visual()
+
+    async def async_set_density(self, density: int) -> None:
+        """How many lit points an effect uses. Resends a running effect."""
+        self.state.effect_density = max(1, min(100, int(density)))
+        self._notify()
+        if self.state.is_on and self._effect_id() is not None:
+            await self._send_visual()
+
+    async def async_set_music_mode(self, mode: int) -> None:
+        """Pick the music mode and switch the microphone on."""
+        self.state.music_mode = mode
+        self.state.mic = True
+        self.state.effect = MICROPHONE
+        self.state.is_on = True
+        self._notify()
+        await self._send_visual()
+
+    def _palette_colors(self) -> list[tuple[float, float]]:
+        return symphony.palette_colors(self.state.palette, self.state.hs)
 
     async def async_set_remember(self, remember: bool) -> None:
         """Remember the next color across power loss. Uses the 0x31 persist flag."""
@@ -494,8 +537,7 @@ class StarlightDevice:
         name = self.state.effect
         if not name or name in (SOLID, MICROPHONE):
             return None
-        table = ADDRESSABLE_EFFECTS if self.kind == "addressable" else SIMPLE_EFFECTS
-        for effect_id, label in table.items():
+        for effect_id, label in self._effect_table().items():
             if label == name:
                 return effect_id
         return None
@@ -503,6 +545,27 @@ class StarlightDevice:
     async def _send_visual(self) -> None:
         percent = brightness_to_percent(self.state.brightness)
         red, green, blue = ha_hs_to_rgb(*self.state.hs)
+        if self.is_symphony:
+            if self.state.mic or self.state.effect == MICROPHONE:
+                payload = symphony.music_payload(
+                    self.state.music_mode,
+                    self.state.mic_sensitivity,
+                    percent,
+                    self._palette_colors(),
+                )
+                await self._send(payload, OPCODE_COMMAND)
+                return
+            effect_id = self._effect_id()
+            if effect_id is not None:
+                payload = symphony.effect_payload(
+                    effect_id,
+                    self.state.effect_speed,
+                    percent,
+                    self._palette_colors(),
+                    density=self.state.effect_density,
+                )
+                await self._send(payload, OPCODE_COMMAND)
+                return
         if self.state.mic or self.state.effect == MICROPHONE:
             await self._send(
                 music_payload(
@@ -734,6 +797,15 @@ class StarlightDevice:
             if name:
                 self.state.effect = name
                 effect = name
+        if decoded.effect_speed is not None:
+            self.state.effect_speed = decoded.effect_speed
+        if decoded.mic is not None and self.kind != "stair":
+            self.state.mic = decoded.mic
+            if decoded.mic:
+                self.state.effect = MICROPHONE
+                effect = MICROPHONE
+            elif self.state.effect == MICROPHONE:
+                self.state.effect = None
         if decoded.induction is not None:
             self.state.induction = decoded.induction
         if decoded.slow_open is not None:
