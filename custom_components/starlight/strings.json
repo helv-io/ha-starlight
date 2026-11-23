@@ -50,6 +50,15 @@
       },
       "power_on": {
         "name": "Power on color"
+      },
+      "effect_colors": {
+        "name": "Effect colors"
+      },
+      "music_mode": {
+        "name": "Music mode"
+      },
+      "timer": {
+        "name": "Timer"
       }
     },
     "number": {
@@ -67,6 +76,9 @@
       },
       "mic_sensitivity": {
         "name": "Mic sensitivity"
+      },
+      "effect_density": {
+        "name": "Effect density"
       }
     },
     "switch": {
@@ -119,6 +131,10 @@
         "force": {
           "name": "Allow install commands",
           "description": "Send commands that change wiring or step setup."
+        },
+        "opcode": {
+          "name": "Frame opcode",
+          "description": "Transport opcode (10 or 11). Leave empty for the default."
         }
       }
     }

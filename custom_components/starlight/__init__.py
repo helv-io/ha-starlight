@@ -44,7 +44,7 @@ async def async_setup(hass: HomeAssistant, config: dict) -> bool:
     hass.data.setdefault(DOMAIN, {})
 
     async def _devices(call) -> list[StarlightDevice]:
-        entry_ids = await async_extract_config_entry_ids(hass, call)
+        entry_ids = await async_extract_config_entry_ids(call)
         if not entry_ids:
             entry_ids = set(hass.data[DOMAIN])
         return [
@@ -71,8 +71,9 @@ async def async_setup(hass: HomeAssistant, config: dict) -> bool:
             raise HomeAssistantError(
                 "That command changes install data. Turn on Allow install commands to send it."
             )
+        opcode = call.data.get("opcode")
         for device in await _devices(call):
-            await device.async_send_payload(payload)
+            await device.async_send_payload(payload, int(opcode) if opcode is not None else None)
 
     hass.services.async_register(DOMAIN, "sweep", handle_sweep)
     hass.services.async_register(DOMAIN, "send_payload", handle_send_payload)

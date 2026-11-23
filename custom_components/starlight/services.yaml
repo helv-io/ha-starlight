@@ -37,3 +37,11 @@ send_payload:
       description: Send commands that change wiring or step setup.
       selector:
         boolean:
+    opcode:
+      name: Frame opcode
+      description: Transport opcode (10 or 11). Leave empty for the default.
+      selector:
+        number:
+          min: 0
+          max: 255
+          mode: box

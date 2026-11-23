@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from .products import Product
 from .rgb import parse_state_response
 from .stair import TAB_LABELS, StairMode, mode_by_wire, tab_by_index
+from .symphony import MODE_EFFECT, MODE_MUSIC, MODE_STATIC, MUSIC_MODES, find_state, is_symphony
 
 # parseWifiBleV2StairLightData reads a 0x23/0x24 flag at byte 2. The header
 # in front of that record is not fixed, so the record is located by the flag.
@@ -36,6 +37,9 @@ class DecodedState:
     run_time: int | None = None
     hold_time: int | None = None
     color_temp: bool = False
+    effect_speed: int | None = None
+    mic: bool | None = None
+    music_mode: int | None = None
 
     @property
     def known(self) -> bool:
@@ -53,6 +57,8 @@ class DecodedState:
                 self.slow_open,
                 self.run_time,
                 self.hold_time,
+                self.effect_speed,
+                self.mic,
             )
         )
 
@@ -92,6 +98,10 @@ def decode_payload(data: bytes, product: Product | None) -> DecodedState:
         echoed = _decode_ef(data)
         if echoed.known:
             return echoed
+    if is_symphony(product):
+        symphony = _decode_symphony(data)
+        if symphony.known:
+            return symphony
     if is_stair_protocol(product):
         window = find_stair_record(data)
         if window is not None:
@@ -100,6 +110,28 @@ def decode_payload(data: bytes, product: Product | None) -> DecodedState:
     if rgb.known:
         return rgb
     return DecodedState()
+
+
+def _decode_symphony(data: bytes) -> DecodedState:
+    """Decode an ``EA 81`` upload from a symphony controller."""
+    parsed = find_state(data)
+    if parsed is None:
+        return DecodedState()
+    decoded = DecodedState(is_on=parsed.is_on)
+    if parsed.mode == MODE_STATIC:
+        decoded.hs = (parsed.hue, parsed.saturation)
+        if 1 <= parsed.value <= 100:
+            decoded.brightness = parsed.value
+        decoded.mic = False
+    elif parsed.mode == MODE_EFFECT:
+        decoded.effect_id = parsed.effect_id
+        decoded.effect_speed = parsed.speed if 1 <= parsed.speed <= 100 else None
+        decoded.mic = False
+    elif parsed.mode == MODE_MUSIC:
+        decoded.mic = True
+        if parsed.effect_id in MUSIC_MODES:
+            decoded.music_mode = parsed.effect_id
+    return decoded
 
 
 def find_stair_record(data: bytes) -> bytes | None:
@@ -254,6 +286,10 @@ def field_map(decoded: DecodedState, *, effect: str | None, raw: str, opcode: in
         fields["run_time"] = decoded.run_time
     if decoded.hold_time is not None:
         fields["hold_time"] = decoded.hold_time
+    if decoded.effect_speed is not None:
+        fields["speed"] = decoded.effect_speed
+    if decoded.mic is not None:
+        fields["microphone"] = decoded.mic
     return fields
 
 

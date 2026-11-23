@@ -11,6 +11,7 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from .const import DOMAIN
 from .device import StarlightDevice
 from .entity import StarlightEntity
+from .protocol import symphony
 from .protocol.stair import TABS
 
 _TAB_LABELS = {"step": "Step", "stream": "Stream", "time": "Time"}
@@ -28,9 +29,78 @@ async def async_setup_entry(
     if device.kind == "stair":
         entities.append(StairTabSelect(device))
         entities.append(StairModeSelect(device))
+    elif device.is_symphony:
+        entities.append(PaletteSelect(device))
+        if device.supports_music:
+            entities.append(MusicModeSelect(device))
+        entities.append(TimerSelect(device))
     else:
         entities.append(PowerOnSelect(device))
     async_add_entities(entities)
+
+
+class PaletteSelect(StarlightEntity, SelectEntity):
+    """Colors used by effects and music mode."""
+
+    _attr_translation_key = "effect_colors"
+    _attr_icon = "mdi:palette-swatch"
+    _attr_options = list(symphony.PALETTES)
+
+    def __init__(self, device: StarlightDevice) -> None:
+        super().__init__(device)
+        self._attr_unique_id = f"{device.address}_palette"
+
+    @property
+    def current_option(self) -> str | None:
+        return self._device.state.palette
+
+    async def async_select_option(self, option: str) -> None:
+        await self._device.async_set_palette(option)
+
+
+class MusicModeSelect(StarlightEntity, SelectEntity):
+    """How the lights follow the controller's microphone."""
+
+    _attr_translation_key = "music_mode"
+    _attr_icon = "mdi:music"
+    _attr_options = list(symphony.MUSIC_MODES.values())
+
+    def __init__(self, device: StarlightDevice) -> None:
+        super().__init__(device)
+        self._attr_unique_id = f"{device.address}_music_mode"
+
+    @property
+    def current_option(self) -> str | None:
+        return symphony.MUSIC_MODES.get(self._device.state.music_mode)
+
+    async def async_select_option(self, option: str) -> None:
+        for mode, label in symphony.MUSIC_MODES.items():
+            if label == option:
+                await self._device.async_set_music_mode(mode)
+                return
+
+
+class TimerSelect(StarlightEntity, SelectEntity):
+    """The remote's timer keys, stored in the controller's own timer slots."""
+
+    _attr_translation_key = "timer"
+    _attr_icon = "mdi:timer-cog-outline"
+    _attr_options = list(symphony.TIMER_OPTIONS)
+
+    def __init__(self, device: StarlightDevice) -> None:
+        super().__init__(device)
+        self._attr_unique_id = f"{device.address}_timer"
+
+    @property
+    def current_option(self) -> str | None:
+        return self._device.state.timer
+
+    @property
+    def extra_state_attributes(self) -> dict:
+        return {"slots": self._device.state.timers}
+
+    async def async_select_option(self, option: str) -> None:
+        await self._device.async_set_timer(option)
 
 
 class StairTabSelect(StarlightEntity, SelectEntity):

@@ -31,6 +31,8 @@ async def async_setup_entry(
         )
     elif device.supports_effects:
         entities.append(EffectSpeedNumber(device))
+        if device.is_symphony:
+            entities.append(EffectDensityNumber(device))
     if device.supports_music:
         entities.append(SensitivityNumber(device))
     async_add_entities(entities)
@@ -123,3 +125,23 @@ class SensitivityNumber(_Number):
 
     async def async_set_native_value(self, value: float) -> None:
         await self._device.async_set_sensitivity(int(value))
+
+
+class EffectDensityNumber(_Number):
+    """How dense a symphony effect is."""
+
+    _attr_translation_key = "effect_density"
+    _attr_icon = "mdi:dots-horizontal"
+    _attr_native_min_value = 1
+    _attr_native_max_value = 100
+
+    def __init__(self, device: StarlightDevice) -> None:
+        super().__init__(device)
+        self._attr_unique_id = f"{device.address}_density"
+
+    @property
+    def native_value(self) -> float:
+        return float(self._device.state.effect_density)
+
+    async def async_set_native_value(self, value: float) -> None:
+        await self._device.async_set_density(int(value))

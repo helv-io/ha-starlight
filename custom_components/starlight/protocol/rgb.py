@@ -12,6 +12,7 @@ import colorsys
 
 from .commands import CommandError, build_from_template
 from .products import Product, command_form
+from .symphony import is_symphony
 
 MIN_KELVIN = 2700
 MAX_KELVIN = 6500
@@ -109,7 +110,11 @@ def power_payload(product: Product | None, on: bool, firmware: int = 0) -> bytes
         return _stair_power(on)
     code = None
     if product is not None:
-        code = product.best(firmware, ["switch_led_v3", "switch_led_v2", "switch_led"])
+        order = ["switch_led_v3", "switch_led_v2", "switch_led"]
+        if is_symphony(product):
+            # Checked on a tree: E0 01 is ignored, the bare 3B power works.
+            order = ["switch_led_v2", "switch_led_v3", "switch_led"]
+        code = product.best(firmware, order)
     form = command_form(product, code) if code else None
     if form is None:
         form = command_form(product, "switch_led")
